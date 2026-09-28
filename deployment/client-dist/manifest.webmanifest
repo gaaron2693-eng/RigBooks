@@ -1,6 +1,6 @@
 {
-  "name": "RigBooks",
-  "short_name": "RigBooks",
+  "name": "RigRevenue",
+  "short_name": "RigRevenue",
   "display": "standalone",
   "start_url": ".",
   "theme_color": "#202522",

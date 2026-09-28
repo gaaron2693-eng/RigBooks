@@ -1,6 +1,6 @@
-# RigBooks — Render deployment bundle
+# RigRevenue — Render deployment bundle
 
-This folder is the standalone production server plus the already-built RigBooks browser bundle. It does not require the private Muse artifact runtime.
+This folder is the standalone production server plus the already-built RigRevenue browser bundle. It does not require the private Muse artifact runtime.
 
 ## Deploy with the Render Blueprint
 
@@ -16,7 +16,7 @@ If the free service/database plan is unavailable on the account or region, choos
 
 - `client-dist/` — compiled, production browser assets.
 - `src/server.ts` — Bun HTTP server, typed action dispatcher, static-file server, signed blob delivery, OpenAI adapter, health check, and migration runner.
-- `src/actions.ts` — standalone copy of the complete RigBooks action layer.
+- `src/actions.ts` — standalone copy of the complete RigRevenue action layer.
 - `src/schema.ts` — Drizzle PostgreSQL schema.
 - `postgres/001_initial.sql` — idempotently tracked fresh-database migration containing the full application schema and durable blob table.
 - `postgres/schema.sql` — convenient copy of the complete PostgreSQL schema for review or manual provisioning.

@@ -1,4 +1,4 @@
-# RigBooks Render deployment manifest
+# RigRevenue Render deployment manifest
 
 - `Dockerfile` — production Bun image and health check.
 - `render.yaml` — Render web service plus managed PostgreSQL Blueprint.
