@@ -1,0 +1,20 @@
+{
+  "name": "rigbooks-render",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build ./src/server.ts --target=bun --packages=external --outdir=./dist",
+    "start": "bun ./dist/server.js",
+    "typecheck": "bun x tsc --noEmit"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.45.2",
+    "pg": "8.16.3",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "@types/pg": "8.15.5",
+    "typescript": "5.6.3"
+  }
+}

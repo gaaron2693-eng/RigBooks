@@ -1,0 +1,3 @@
+d75fddc2c84e7e0cf3e9980a99b048da7b4690908b6ad31849a82c1c6e1bbb6c  deployment/dist/server.js
+069a1879593f2f1027e0b113b1c16e611966860df1a6eeb8409986af8bb6a9ad  deployment/client-dist/index.html
+5d2822fd66bb2fb064124db394d10965a5a256618d97959ad2914cd381db0de3  deployment/postgres/001_initial.sql
