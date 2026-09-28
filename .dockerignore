@@ -1,0 +1,10 @@
+.git
+node_modules
+app.db*
+blobs
+audits
+client/dist-cvm
+server/dist
+deployment/node_modules
+deployment/dist
+*.zip
