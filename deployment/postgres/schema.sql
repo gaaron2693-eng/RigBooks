@@ -58,6 +58,7 @@ CREATE TABLE truck_profiles (
   weight_pounds INTEGER NOT NULL DEFAULT 80000,
   length_feet INTEGER NOT NULL DEFAULT 75,
   width_inches INTEGER NOT NULL DEFAULT 102,
+  has_prepass BOOLEAN NOT NULL DEFAULT FALSE,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
