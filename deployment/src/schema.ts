@@ -1,4 +1,4 @@
-import { index, integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, index, integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
@@ -52,7 +52,8 @@ export const truckProfiles = pgTable("truck_profiles", {
   truckName: text("truck_name").notNull(), currentOdometerTenths: integer("current_odometer_tenths").notNull(),
   lastPmOdometerTenths: integer("last_pm_odometer_tenths").notNull(), pmIntervalTenths: integer("pm_interval_tenths").notNull(),
   heightInches: integer("height_inches").notNull().default(162), weightPounds: integer("weight_pounds").notNull().default(80000),
-  lengthFeet: integer("length_feet").notNull().default(75), widthInches: integer("width_inches").notNull().default(102), updatedAt: updatedAt(),
+  lengthFeet: integer("length_feet").notNull().default(75), widthInches: integer("width_inches").notNull().default(102),
+  hasPrePass: boolean("has_prepass").notNull().default(false), updatedAt: updatedAt(),
 }, (table) => [uniqueIndex("truck_profiles_account_id_unique").on(table.accountId)]);
 
 export const loads = pgTable("loads", {
