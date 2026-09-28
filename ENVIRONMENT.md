@@ -8,7 +8,7 @@ The Render Blueprint wires most values automatically. These are every environmen
 |---|---|---|
 | `DATABASE_URL` | `render.yaml` from `rigbooks-postgres` | PostgreSQL connection string. RigBooks applies `deployment/postgres/001_initial.sql` once on startup, under an advisory lock. |
 | `SESSION_PEPPER` | Render-generated secret | High-entropy secret used to sign short-lived private receipt, logo, and document URLs. Changing it invalidates outstanding file links but does not delete data. |
-| `OPENAI_API_KEY` | You, in the Render setup form | Server-side API key used by Sam the Semi, rate-confirmation image extraction, trucking news/search, weather context, and other bounded AI responses. Never expose it in the client. |
+| `OPENAI_API_KEY` | Optional — you, in the Render dashboard (leave unset to run without AI) | Server-side API key used by Sam the Semi, rate-confirmation image extraction, trucking news/search, weather context, and other bounded AI responses. Never expose it in the client. The server boots fine without it; AI features return a clear "not configured" message until a key is added. |Never expose it in the client. |
 
 ## Optional / platform-provided
 
