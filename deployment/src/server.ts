@@ -171,6 +171,11 @@ const server = Bun.serve({
     const url = new URL(request.url);
     if (url.pathname === "/health") {
       try { await pool.query("SELECT 1"); return json({ ok: true }); } catch { return json({ ok: false }, 503); }
+  
+
+  const legacyHost = request.headers.get("host")?.split(":")[0]?.toLowerCase();
+    if (legacyHost === "rigbooks.onrender.com") {
+      return Response.redirect(`https://rigrevenue.onrender.com${url.pathname}${url.search}`, 301);
     }
     if (url.pathname.startsWith("/files/") && request.method === "GET") return serveBlob(url);
     if (url.pathname === "/actions" && request.method === "POST") {
