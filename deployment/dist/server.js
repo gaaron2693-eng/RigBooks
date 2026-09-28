@@ -21,14 +21,9 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
 import { z as z2 } from "zod";
 
-// src/runtime.ts
-import { z } from "zod";
-function defineAction(spec) {
-  return spec;
-}
-
 // src/actions.ts
-import { and, asc, desc, eq, gte, inArray, isNull, lte } from "drizzle-orm";
+import { defineAction, z } from "@hatch/space-sdk";
+import { and, asc, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 
 // src/schema.ts
 var exports_schema = {};
@@ -50,11 +45,9 @@ __export(exports_schema, {
   truckProfiles: () => truckProfiles,
   workShifts: () => workShifts
 });
-import { boolean, index, integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
-var createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
-var updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
-var accounts = pgTable("accounts", {
-  id: serial("id").primaryKey(),
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+var accounts = sqliteTable("accounts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   viewerFbid: text("viewer_fbid").notNull(),
   displayName: text("display_name").notNull(),
   email: text("email"),
@@ -63,37 +56,40 @@ var accounts = pgTable("accounts", {
   passwordSalt: text("password_salt"),
   role: text("role", { enum: ["standard", "creator", "tester"] }).notNull().default("standard"),
   accessLabel: text("access_label"),
-  createdAt: createdAt(),
-  updatedAt: updatedAt()
-}, (table) => [uniqueIndex("accounts_viewer_fbid_unique").on(table.viewerFbid), uniqueIndex("accounts_email_unique").on(table.email)]);
-var driverPosts = pgTable("driver_posts", {
-  id: serial("id").primaryKey(),
-  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
-  body: text("body").notNull(),
-  createdAt: createdAt()
-}, (table) => [index("driver_posts_created_at_idx").on(table.createdAt)]);
-var driverReplies = pgTable("driver_replies", {
-  id: serial("id").primaryKey(),
-  postId: integer("post_id").notNull().references(() => driverPosts.id, { onDelete: "cascade" }),
-  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
-  body: text("body").notNull(),
-  createdAt: createdAt()
-}, (table) => [index("driver_replies_post_created_idx").on(table.postId, table.createdAt)]);
-var driverPostLikes = pgTable("driver_post_likes", {
-  id: serial("id").primaryKey(),
-  postId: integer("post_id").notNull().references(() => driverPosts.id, { onDelete: "cascade" }),
-  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
-  createdAt: createdAt()
-}, (table) => [uniqueIndex("driver_post_likes_post_account_unique").on(table.postId, table.accountId)]);
-var accountSessions = pgTable("account_sessions", {
-  id: serial("id").primaryKey(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+}, (table) => [
+  uniqueIndex("accounts_viewer_fbid_unique").on(table.viewerFbid),
+  uniqueIndex("accounts_email_unique").on(table.email)
+]);
+var accountSessions = sqliteTable("account_sessions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
   sessionTokenHash: text("session_token_hash").notNull(),
-  createdAt: createdAt(),
-  lastUsedAt: timestamp("last_used_at", { withTimezone: true }).notNull().defaultNow()
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date),
+  lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
 }, (table) => [uniqueIndex("account_sessions_token_hash_unique").on(table.sessionTokenHash)]);
-var truckProfiles = pgTable("truck_profiles", {
-  id: serial("id").primaryKey(),
+var driverPosts = sqliteTable("driver_posts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  body: text("body").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+}, (table) => [index("driver_posts_created_at_idx").on(table.createdAt)]);
+var driverReplies = sqliteTable("driver_replies", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  postId: integer("post_id").notNull().references(() => driverPosts.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  body: text("body").notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+}, (table) => [index("driver_replies_post_created_idx").on(table.postId, table.createdAt)]);
+var driverPostLikes = sqliteTable("driver_post_likes", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  postId: integer("post_id").notNull().references(() => driverPosts.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+}, (table) => [uniqueIndex("driver_post_likes_post_account_unique").on(table.postId, table.accountId)]);
+var truckProfiles = sqliteTable("truck_profiles", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
   truckName: text("truck_name").notNull(),
   currentOdometerTenths: integer("current_odometer_tenths").notNull(),
@@ -103,11 +99,11 @@ var truckProfiles = pgTable("truck_profiles", {
   weightPounds: integer("weight_pounds").notNull().default(80000),
   lengthFeet: integer("length_feet").notNull().default(75),
   widthInches: integer("width_inches").notNull().default(102),
-  hasPrePass: boolean("has_prepass").notNull().default(false),
-  updatedAt: updatedAt()
+  hasPrePass: integer("has_prepass", { mode: "boolean" }).notNull().default(false),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
 }, (table) => [uniqueIndex("truck_profiles_account_id_unique").on(table.accountId)]);
-var loads = pgTable("loads", {
-  id: serial("id").primaryKey(),
+var loads = sqliteTable("loads", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   reference: text("reference"),
   broker: text("broker"),
@@ -122,10 +118,10 @@ var loads = pgTable("loads", {
   payPercentBasisPoints: integer("pay_percent_basis_points"),
   perMileRateCents: integer("per_mile_rate_cents"),
   notes: text("notes"),
-  createdAt: createdAt()
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
 });
-var paySettings = pgTable("pay_settings", {
-  id: serial("id").primaryKey(),
+var paySettings = sqliteTable("pay_settings", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   driverType: text("driver_type", { enum: ["company_driver", "lease_purchase", "owner_operator", "hourly_driver"] }).notNull(),
   vehicleType: text("vehicle_type", { enum: ["dump_truck", "cement_mixer", "straight_truck", "hotshot", "tractor_trailer"] }),
@@ -137,48 +133,50 @@ var paySettings = pgTable("pay_settings", {
   weeklyMaintenanceEscrowCents: integer("weekly_maintenance_escrow_cents").notNull().default(0),
   weeklyInsuranceCents: integer("weekly_insurance_cents").notNull().default(0),
   weeklyOtherDeductionsCents: integer("weekly_other_deductions_cents").notNull().default(0),
-  updatedAt: updatedAt()
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
 });
-var workShifts = pgTable("work_shifts", {
-  id: serial("id").primaryKey(),
+var workShifts = sqliteTable("work_shifts", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
   workDate: text("work_date").notNull(),
-  clockInAt: timestamp("clock_in_at", { withTimezone: true }).notNull(),
-  clockOutAt: timestamp("clock_out_at", { withTimezone: true }),
+  clockInAt: integer("clock_in_at", { mode: "timestamp_ms" }).notNull(),
+  clockOutAt: integer("clock_out_at", { mode: "timestamp_ms" }),
   notes: text("notes"),
-  createdAt: createdAt()
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
 });
-var subscriptionAccess = pgTable("subscription_access", {
-  id: serial("id").primaryKey(),
+var subscriptionAccess = sqliteTable("subscription_access", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   clientId: text("client_id").notNull(),
   role: text("role", { enum: ["creator", "tester"] }).notNull(),
   label: text("label"),
-  createdAt: createdAt()
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
 }, (table) => [uniqueIndex("subscription_access_client_id_unique").on(table.clientId)]);
-var compInvites = pgTable("comp_invites", {
-  id: serial("id").primaryKey(),
+var compInvites = sqliteTable("comp_invites", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   codeHash: text("code_hash").notNull(),
   codeHint: text("code_hint").notNull(),
   label: text("label").notNull(),
   createdByClientId: text("created_by_client_id").notNull(),
   redeemedByClientId: text("redeemed_by_client_id"),
-  createdAt: createdAt(),
-  redeemedAt: timestamp("redeemed_at", { withTimezone: true })
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date),
+  redeemedAt: integer("redeemed_at", { mode: "timestamp_ms" })
 }, (table) => [uniqueIndex("comp_invites_code_hash_unique").on(table.codeHash)]);
-var expenses = pgTable("expenses", {
-  id: serial("id").primaryKey(),
+var expenses = sqliteTable("expenses", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
-  category: text("category", { enum: ["fuel", "tolls", "maintenance", "insurance", "truck_payment", "other"] }).notNull(),
+  category: text("category", {
+    enum: ["fuel", "tolls", "maintenance", "insurance", "truck_payment", "other"]
+  }).notNull(),
   description: text("description"),
   expenseDate: text("expense_date").notNull(),
   amountCents: integer("amount_cents").notNull(),
   gallonsThousandths: integer("gallons_thousandths"),
   fuelState: text("fuel_state"),
   receiptBlobKey: text("receipt_blob_key"),
-  createdAt: createdAt()
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
 });
-var iftaEntries = pgTable("ifta_entries", {
-  id: serial("id").primaryKey(),
+var iftaEntries = sqliteTable("ifta_entries", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   loadId: integer("load_id").references(() => loads.id, { onDelete: "cascade" }),
   stateCode: text("state_code").notNull(),
@@ -186,10 +184,10 @@ var iftaEntries = pgTable("ifta_entries", {
   gallonsThousandths: integer("gallons_thousandths").notNull().default(0),
   source: text("source", { enum: ["load", "gps", "manual", "fuel"] }).notNull(),
   entryDate: text("entry_date").notNull(),
-  createdAt: createdAt()
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
 });
-var invoices = pgTable("invoices", {
-  id: serial("id").primaryKey(),
+var invoices = sqliteTable("invoices", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   loadId: integer("load_id").notNull().references(() => loads.id, { onDelete: "cascade" }),
   invoiceNumber: text("invoice_number").notNull(),
@@ -197,11 +195,11 @@ var invoices = pgTable("invoices", {
   dueDate: text("due_date").notNull(),
   status: text("status", { enum: ["draft", "sent", "paid"] }).notNull().default("draft"),
   notes: text("notes"),
-  createdAt: createdAt(),
-  sentAt: timestamp("sent_at", { withTimezone: true })
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date),
+  sentAt: integer("sent_at", { mode: "timestamp_ms" })
 }, (table) => [uniqueIndex("invoices_invoice_number_unique").on(table.invoiceNumber)]);
-var documents = pgTable("documents", {
-  id: serial("id").primaryKey(),
+var documents = sqliteTable("documents", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   title: text("title").notNull(),
   category: text("category", { enum: ["bol", "insurance", "registration", "other"] }).notNull(),
@@ -209,10 +207,10 @@ var documents = pgTable("documents", {
   blobKey: text("blob_key").notNull(),
   mimeType: text("mime_type").notNull(),
   filename: text("filename").notNull(),
-  createdAt: createdAt()
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
 });
-var companyProfile = pgTable("company_profile", {
-  id: serial("id").primaryKey(),
+var companyProfile = sqliteTable("company_profile", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   companyName: text("company_name").notNull(),
   address: text("address"),
@@ -222,7 +220,7 @@ var companyProfile = pgTable("company_profile", {
   mcNumber: text("mc_number"),
   dotNumber: text("dot_number"),
   logoBlobKey: text("logo_blob_key"),
-  updatedAt: updatedAt()
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
 });
 
 // src/actions.ts
@@ -426,10 +424,21 @@ async function findAccountForToken(ctx, token) {
 async function requireAccount(ctx, sessionToken) {
   const row = await findAccountForToken(ctx, sessionToken);
   if (!row)
-    throw new Error("Your RigBooks session has ended. Sign in again.");
+    throw new Error("Your RigRevenue session has ended. Sign in again.");
   return row;
 }
-async function ensurePrePassColumn(_ctx) {}
+var prePassColumnReady = false;
+async function ensurePrePassColumn(ctx) {
+  if (prePassColumnReady)
+    return;
+  try {
+    await ctx.db().run(sql.raw('ALTER TABLE "truck_profiles" ADD COLUMN "has_prepass" integer NOT NULL DEFAULT 0'));
+  } catch (error) {
+    if (!String(error).toLowerCase().includes("duplicate column"))
+      throw error;
+  }
+  prePassColumnReady = true;
+}
 function bytesToHex(bytes) {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
 }
@@ -657,7 +666,7 @@ var Actions = {
       }
       const legacy = (await db.select().from(subscriptionAccess).where(eq(subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const inheritedRole = viewer?.isOwner ? "creator" : legacy?.role ?? "standard";
-      const inheritedLabel = viewer?.isOwner ? "RigBooks creator" : legacy?.label ?? null;
+      const inheritedLabel = viewer?.isOwner ? "RigRevenue creator" : legacy?.label ?? null;
       if (account && account.role === "standard" && inheritedRole !== "standard") {
         await db.update(accounts).set({ role: inheritedRole, accessLabel: inheritedLabel, updatedAt: new Date }).where(eq(accounts.id, account.id));
         account.role = inheritedRole;
@@ -694,7 +703,7 @@ var Actions = {
         throw new Error("You are already signed in.");
       const legacy = (await db.select().from(subscriptionAccess).where(eq(subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role = viewer?.isOwner ? "creator" : legacy?.role ?? "standard";
-      const accessLabel = viewer?.isOwner ? "RigBooks creator" : legacy?.label ?? null;
+      const accessLabel = viewer?.isOwner ? "RigRevenue creator" : legacy?.label ?? null;
       const salt = crypto.getRandomValues(new Uint8Array(16));
       const passwordSalt = bytesToHex(salt);
       const passwordHash = await derivePasswordHash(args.password, passwordSalt);
@@ -710,7 +719,7 @@ var Actions = {
       }).returning();
       const account = result[0];
       if (!account)
-        throw new Error("Could not create your RigBooks account.");
+        throw new Error("Could not create your RigRevenue account.");
       const sessionToken = await issueSession(ctx, account.id);
       if (role === "creator")
         await moveUnownedLedgerToAccount(ctx, account.id);
@@ -768,14 +777,14 @@ var Actions = {
     async handler(ctx, args) {
       const viewer = ctx.viewer;
       if (!viewer)
-        throw new Error("Sign in to Muse before creating a RigBooks account.");
+        throw new Error("Sign in to Muse before creating a RigRevenue account.");
       const db = ctx.db();
       const existing = (await db.select().from(accounts).where(eq(accounts.viewerFbid, viewer.viewerFbid)).limit(1))[0];
       if (existing)
         return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, createdAt: existing.createdAt.toISOString() };
       const legacy = (await db.select().from(subscriptionAccess).where(eq(subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role = viewer.isOwner ? "creator" : legacy?.role ?? "standard";
-      const accessLabel = viewer.isOwner ? "RigBooks creator" : legacy?.label ?? null;
+      const accessLabel = viewer.isOwner ? "RigRevenue creator" : legacy?.label ?? null;
       const result = await db.insert(accounts).values({
         viewerFbid: viewer.viewerFbid,
         displayName: args.displayName.trim(),
@@ -786,7 +795,7 @@ var Actions = {
       }).returning();
       const account = result[0];
       if (!account)
-        throw new Error("Could not create your RigBooks account.");
+        throw new Error("Could not create your RigRevenue account.");
       if (role === "creator")
         await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
@@ -837,10 +846,10 @@ var Actions = {
       const existingCreator = creatorRows[0];
       if (existingCreator && existingCreator.id !== account.id)
         throw new Error("Creator access has already been claimed.");
-      await db.update(accounts).set({ role: "creator", accessLabel: "RigBooks creator", updatedAt: new Date }).where(eq(accounts.id, account.id));
+      await db.update(accounts).set({ role: "creator", accessLabel: "RigRevenue creator", updatedAt: new Date }).where(eq(accounts.id, account.id));
       const legacyRows = await db.select({ id: subscriptionAccess.id }).from(subscriptionAccess).where(eq(subscriptionAccess.clientId, args.clientId)).limit(1);
       if (!legacyRows[0])
-        await db.insert(subscriptionAccess).values({ clientId: args.clientId, role: "creator", label: "RigBooks creator" });
+        await db.insert(subscriptionAccess).values({ clientId: args.clientId, role: "creator", label: "RigRevenue creator" });
       await db.batch([
         db.update(loads).set({ accountId: account.id }).where(isNull(loads.accountId)),
         db.update(expenses).set({ accountId: account.id }).where(isNull(expenses.accountId)),
@@ -1440,7 +1449,7 @@ var Actions = {
       url.searchParams.set("lat", String(args.lat));
       url.searchParams.set("lon", String(args.lng));
       url.searchParams.set("format", "jsonv2");
-      const response = await fetch(url, { headers: { "User-Agent": "RigBooks/1.0" } });
+      const response = await fetch(url, { headers: { "User-Agent": "RigRevenue/1.0" } });
       if (!response.ok)
         throw new Error("Could not identify the state for this GPS segment.");
       const data = await response.json();
@@ -1532,7 +1541,7 @@ var Actions = {
         const likes = likeRows.filter((like) => like.postId === post.id);
         return {
           id: post.id,
-          driverName: names.get(post.accountId) ?? "RigBooks driver",
+          driverName: names.get(post.accountId) ?? "RigRevenue driver",
           body: post.body,
           createdAt: post.createdAt.toISOString(),
           likeCount: likes.length,
@@ -1540,7 +1549,7 @@ var Actions = {
           replies: replyRows.filter((reply) => reply.postId === post.id).map((reply) => ({
             id: reply.id,
             postId: reply.postId,
-            driverName: names.get(reply.accountId) ?? "RigBooks driver",
+            driverName: names.get(reply.accountId) ?? "RigRevenue driver",
             body: reply.body,
             createdAt: reply.createdAt.toISOString()
           }))
@@ -1658,7 +1667,7 @@ var Actions = {
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
       if (account.role === "standard")
-        throw new Error("Road for Truckers requires RigBooks Pro.");
+        throw new Error("Road for Truckers requires RigRevenue Pro.");
       await ensurePrePassColumn(ctx);
       const truck = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
       if (!truck)
@@ -1668,7 +1677,7 @@ var Actions = {
         url.searchParams.set("q", query);
         url.searchParams.set("format", "jsonv2");
         url.searchParams.set("limit", "1");
-        const response = await fetch(url, { headers: { "User-Agent": "RigBooks/1.0" } });
+        const response = await fetch(url, { headers: { "User-Agent": "RigRevenue/1.0" } });
         if (!response.ok)
           throw new Error("A route location could not be found.");
         const rows = await response.json();
@@ -1680,7 +1689,7 @@ var Actions = {
         return { lat, lng, label: row?.display_name ?? query };
       };
       const [origin, destination] = await Promise.all([geocode(args.origin), geocode(args.destination)]);
-      const routeResponse = await fetch("https://valhalla1.openstreetmap.de/route", { method: "POST", headers: { "Content-Type": "application/json", "X-Client-Id": "rigbooks", "User-Agent": "RigBooks/1.0" }, body: JSON.stringify({ locations: [{ lat: origin.lat, lon: origin.lng }, { lat: destination.lat, lon: destination.lng }], costing: "truck", costing_options: { truck: { height: truck.heightInches * 0.0254, width: truck.widthInches * 0.0254, length: truck.lengthFeet * 0.3048, weight: truck.weightPounds * 0.000453592, axle_load: Math.min(20, truck.weightPounds * 0.000453592 / 5), hazmat: false } }, units: "miles", language: "en-US" }) });
+      const routeResponse = await fetch("https://valhalla1.openstreetmap.de/route", { method: "POST", headers: { "Content-Type": "application/json", "X-Client-Id": "rigrevenue", "User-Agent": "RigRevenue/1.0" }, body: JSON.stringify({ locations: [{ lat: origin.lat, lon: origin.lng }, { lat: destination.lat, lon: destination.lng }], costing: "truck", costing_options: { truck: { height: truck.heightInches * 0.0254, width: truck.widthInches * 0.0254, length: truck.lengthFeet * 0.3048, weight: truck.weightPounds * 0.000453592, axle_load: Math.min(20, truck.weightPounds * 0.000453592 / 5), hazmat: false } }, units: "miles", language: "en-US" }) });
       if (!routeResponse.ok)
         throw new Error("A truck-safe route could not be calculated right now.");
       const routeData = await routeResponse.json();
@@ -1696,7 +1705,7 @@ var Actions = {
       const overpassQuery = `[out:json][timeout:20];(nwr["amenity"="truck_stop"]${around};nwr["amenity"="weighbridge"]["brand"~"CAT",i]${around};nwr["amenity"="weighbridge"]["name"~"CAT Scale",i]${around};);out center tags;`;
       let elements = [];
       try {
-        const response = await fetch("https://overpass-api.de/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigBooks/1.0" }, body: new URLSearchParams({ data: overpassQuery }) });
+        const response = await fetch("https://overpass-api.de/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigRevenue/1.0" }, body: new URLSearchParams({ data: overpassQuery }) });
         if (response.ok)
           elements = (await response.json()).elements ?? [];
       } catch {
@@ -1737,14 +1746,14 @@ var Actions = {
       if (/^(thanks|thank you|thx)( sam| so much| a lot)?$/.test(courtesyText)) {
         return { reply: "you're welcome.", scope: "courtesy", sources: [] };
       }
-      const intent = await ctx.inference.complete(`Classify this question for Sam the Semi, RigBooks' in-app assistant. Choose exactly one scope: app_help (how to use RigBooks), driver_data (the signed-in driver's loads, expenses, earnings, settlements, deductions, or profit), weather (current or forecast road weather), diesel (diesel prices), trip_planning (planning a safe, efficient truck trip or pre-trip readiness), maintenance (truck maintenance, PM timing, inspections, or mechanical care), hos (hours-of-service rules, clocks, breaks, sleeper berth, or logs), trucking_terms (definitions of trucking language, pay terms, or industry shorthand), prayer (a driver asks for a prayer or spiritual encouragement), or out_of_scope. Message: ${args.message}`, { schema: samScopeSchema.exclude(["courtesy"]) });
+      const intent = await ctx.inference.complete(`Classify this question for Sam the Semi, RigRevenue' in-app assistant. Choose exactly one scope: app_help (how to use RigRevenue), driver_data (the signed-in driver's loads, expenses, earnings, settlements, deductions, or profit), weather (current or forecast road weather), diesel (diesel prices), trip_planning (planning a safe, efficient truck trip or pre-trip readiness), maintenance (truck maintenance, PM timing, inspections, or mechanical care), hos (hours-of-service rules, clocks, breaks, sleeper berth, or logs), trucking_terms (definitions of trucking language, pay terms, or industry shorthand), prayer (a driver asks for a prayer or spiritual encouragement), or out_of_scope. Message: ${args.message}`, { schema: samScopeSchema.exclude(["courtesy"]) });
       if (intent === "out_of_scope")
-        return { reply: "I can help with RigBooks, your numbers, trip planning, maintenance, HOS, trucking terms, road weather, diesel prices, and prayers. Pick a topic above or ask me in your own words.", scope: intent, sources: [] };
+        return { reply: "I can help with RigRevenue, your numbers, trip planning, maintenance, HOS, trucking terms, road weather, diesel prices, and prayers. Pick a topic above or ask me in your own words.", scope: intent, sources: [] };
       let context = "";
       let sources = [];
       let searchBackedAnswer = false;
       if (intent === "app_help") {
-        context = `RigBooks guide: Overview shows gross, expenses, net, miles and profit per mile. Loads logs a run manually or from a rate-con photo. Expenses stores fuel and costs with receipt images. Roadside finds truck stops, repair and rest areas. Business is for owner-operators and has load boards, IFTA, invoices, document vault, My Company and news. Driver setup holds account, membership, profile and pay defaults. Lease-purchase supports percentage or per-mile settlement pay plus weekly truck payment, maintenance escrow, insurance and other deductions. Offline entries queue on the device and sync when online.`;
+        context = `RigRevenue guide: Overview shows gross, expenses, net, miles and profit per mile. Loads logs a run manually or from a rate-con photo. Expenses stores fuel and costs with receipt images. Roadside finds truck stops, repair and rest areas. Business is for owner-operators and has load boards, IFTA, invoices, document vault, My Company and news. Driver setup holds account, membership, profile and pay defaults. Lease-purchase supports percentage or per-mile settlement pay plus weekly truck payment, maintenance escrow, insurance and other deductions. Offline entries queue on the device and sync when online.`;
       } else if (intent === "driver_data") {
         const db = ctx.db();
         const [loadRows, expenseRows, payRows] = await Promise.all([
@@ -1765,7 +1774,7 @@ var Actions = {
             url.searchParams.set("lat", String(args.lat));
             url.searchParams.set("lon", String(args.lng));
             url.searchParams.set("format", "jsonv2");
-            const response = await fetch(url, { headers: { "User-Agent": "RigBooks/1.0" } });
+            const response = await fetch(url, { headers: { "User-Agent": "RigRevenue/1.0" } });
             const data = response.ok ? await response.json() : null;
             place = data?.display_name ?? `${args.lat}, ${args.lng}`;
           } catch {
@@ -1775,21 +1784,21 @@ var Actions = {
         const search = await ctx.tool.web_search(`current cheapest diesel prices truck stops near or along ${place}; driver request: ${args.message}`);
         context = `Current web search results for diesel prices: ${JSON.stringify(search)}`;
       } else if (intent === "trip_planning") {
-        context = `Trip-planning guidance: Ask for origin, destination, delivery time, planned fuel range, and any special load limits that are missing. Direct the driver to RigBooks Road for a truck route, route weather, truck stops, repair, rest areas, and CAT scales. Remind the driver to confirm truck dimensions in Driver setup, inspect the truck, check fuel and legal HOS availability, review weather and restrictions, and leave a time buffer. Never invent a route, mileage, restriction, or arrival time.`;
+        context = `Trip-planning guidance: Ask for origin, destination, delivery time, planned fuel range, and any special load limits that are missing. Direct the driver to RigRevenue Road for a truck route, route weather, truck stops, repair, rest areas, and CAT scales. Remind the driver to confirm truck dimensions in Driver setup, inspect the truck, check fuel and legal HOS availability, review weather and restrictions, and leave a time buffer. Never invent a route, mileage, restriction, or arrival time.`;
       } else if (intent === "maintenance") {
         await ensurePrePassColumn(ctx);
         const truck = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
-        context = truck ? `RigBooks truck profile: ${JSON.stringify({ truckName: truck.truckName, currentOdometer: truck.currentOdometerTenths / 10, lastPmOdometer: truck.lastPmOdometerTenths / 10, pmInterval: truck.pmIntervalTenths / 10, nextPmDue: (truck.lastPmOdometerTenths + truck.pmIntervalTenths) / 10 })}. Explain preventive care clearly. Do not diagnose a dangerous mechanical problem remotely; advise stopping safely and using a qualified mechanic when safety may be affected.` : `No truck maintenance profile is saved yet. Explain how to add current odometer, last PM odometer, and PM interval in Driver setup. Give only general preventive-maintenance guidance and do not diagnose a dangerous mechanical problem remotely; advise stopping safely and using a qualified mechanic when safety may be affected.`;
+        context = truck ? `RigRevenue truck profile: ${JSON.stringify({ truckName: truck.truckName, currentOdometer: truck.currentOdometerTenths / 10, lastPmOdometer: truck.lastPmOdometerTenths / 10, pmInterval: truck.pmIntervalTenths / 10, nextPmDue: (truck.lastPmOdometerTenths + truck.pmIntervalTenths) / 10 })}. Explain preventive care clearly. Do not diagnose a dangerous mechanical problem remotely; advise stopping safely and using a qualified mechanic when safety may be affected.` : `No truck maintenance profile is saved yet. Explain how to add current odometer, last PM odometer, and PM interval in Driver setup. Give only general preventive-maintenance guidance and do not diagnose a dangerous mechanical problem remotely; advise stopping safely and using a qualified mechanic when safety may be affected.`;
       } else if (intent === "hos") {
         const search = await ctx.tool.web_search(`current official FMCSA hours of service rules property-carrying commercial drivers; driver question: ${args.message}`);
         context = `Current web search results about federal HOS rules: ${JSON.stringify(search)}`;
         searchBackedAnswer = true;
       } else if (intent === "trucking_terms") {
-        context = `Explain trucking terminology in plain driver language. Common RigBooks-relevant terms include deadhead (unpaid or non-revenue miles driven without a load), detention (time held beyond an agreed free period), lumper (a third-party loading or unloading service), rate confirmation (the written load terms and agreed carrier pay), gross (money before expenses or deductions), net (money after expenses or deductions), and profit per mile (net divided by all miles). If asked about a term not safely known, say so rather than guessing.`;
+        context = `Explain trucking terminology in plain driver language. Common RigRevenue-relevant terms include deadhead (unpaid or non-revenue miles driven without a load), detention (time held beyond an agreed free period), lumper (a third-party loading or unloading service), rate confirmation (the written load terms and agreed carrier pay), gross (money before expenses or deductions), net (money after expenses or deductions), and profit per mile (net divided by all miles). If asked about a term not safely known, say so rather than guessing.`;
       } else if (intent === "prayer") {
         context = `Offer a brief, sincere Christian prayer suitable for a truck driver. Match the requested moment\u2014before a trip, after a safe arrival, for family at home, during stress, or at bedtime. Do not claim guaranteed protection or outcomes. Keep it warm and respectful.`;
       }
-      const prompt = `You are Sam the Semi, a friendly, concise, trucker-aware assistant inside RigBooks. Answer only within the selected scope: ${intent}. Use the supplied context only; do not invent values, prices, conditions, routes, rules, or app behavior. For driver data, calculate exactly from the rows and clearly state the date range used. For diesel, include specific stations and prices only when the search context explicitly supports them; otherwise say live prices were not available and suggest trying a route or current location. For weather, emphasize hazards relevant to driving. For HOS, make clear that the answer is general guidance, use the current search context, and tell the driver to verify their operation and exceptions with FMCSA or their carrier. Keep the answer under 140 words. Conversation: ${JSON.stringify(args.history)}. Driver question: ${args.message}. Context: ${context}`;
+      const prompt = `You are Sam the Semi, a friendly, concise, trucker-aware assistant inside RigRevenue. Answer only within the selected scope: ${intent}. Use the supplied context only; do not invent values, prices, conditions, routes, rules, or app behavior. For driver data, calculate exactly from the rows and clearly state the date range used. For diesel, include specific stations and prices only when the search context explicitly supports them; otherwise say live prices were not available and suggest trying a route or current location. For weather, emphasize hazards relevant to driving. For HOS, make clear that the answer is general guidance, use the current search context, and tell the driver to verify their operation and exceptions with FMCSA or their carrier. Keep the answer under 140 words. Conversation: ${JSON.stringify(args.history)}. Driver question: ${args.message}. Context: ${context}`;
       if (searchBackedAnswer) {
         const result = await ctx.inference.complete(`${prompt} Return up to three useful source links only when their complete URLs appear verbatim in the search context; otherwise return no sources.`, { schema: z.object({ reply: z.string(), sources: z.array(z.object({ title: z.string(), url: z.string().url() })).max(3) }) });
         return { reply: result.reply, scope: intent, sources: result.sources };
@@ -1836,7 +1845,7 @@ ${JSON.stringify(result)}`, { schema: z.array(truckingNewsItemSchema).max(10) })
       searchUrl.searchParams.set("q", args.pickup);
       searchUrl.searchParams.set("format", "jsonv2");
       searchUrl.searchParams.set("limit", "1");
-      const geocodeResponse = await fetch(searchUrl, { headers: { "User-Agent": "RigBooks/1.0" } });
+      const geocodeResponse = await fetch(searchUrl, { headers: { "User-Agent": "RigRevenue/1.0" } });
       if (!geocodeResponse.ok)
         throw new Error("Pickup location could not be found.");
       const candidates = await geocodeResponse.json();
@@ -1846,7 +1855,7 @@ ${JSON.stringify(result)}`, { schema: z.array(truckingNewsItemSchema).max(10) })
       if (!Number.isFinite(pickupLat) || !Number.isFinite(pickupLng))
         throw new Error("Pickup location could not be found.");
       const routeUrl = `https://router.project-osrm.org/route/v1/driving/${args.currentLng},${args.currentLat};${pickupLng},${pickupLat}?overview=false`;
-      const routeResponse = await fetch(routeUrl, { headers: { "User-Agent": "RigBooks/1.0" } });
+      const routeResponse = await fetch(routeUrl, { headers: { "User-Agent": "RigRevenue/1.0" } });
       if (!routeResponse.ok)
         throw new Error("Deadhead route could not be calculated.");
       const routeData = await routeResponse.json();
@@ -1877,7 +1886,7 @@ ${JSON.stringify(result)}`, { schema: z.array(truckingNewsItemSchema).max(10) })
         try {
           const response = await fetch(endpoint, {
             method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigBooks/1.0" },
+            headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigRevenue/1.0" },
             body: new URLSearchParams({ data: query })
           });
           if (!response.ok)
@@ -2130,4 +2139,4 @@ var server = Bun.serve({
     return new Response("Method not allowed", { status: 405 });
   }
 });
-console.log(`RigBooks listening on ${server.url}`);
+console.log(`RigRevenue listening on ${server.url}`);
