@@ -50,7 +50,7 @@ __export(exports_schema, {
   truckProfiles: () => truckProfiles,
   workShifts: () => workShifts
 });
-import { index, integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, index, integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 var createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 var updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
 var accounts = pgTable("accounts", {
@@ -103,6 +103,7 @@ var truckProfiles = pgTable("truck_profiles", {
   weightPounds: integer("weight_pounds").notNull().default(80000),
   lengthFeet: integer("length_feet").notNull().default(75),
   widthInches: integer("width_inches").notNull().default(102),
+  hasPrePass: boolean("has_prepass").notNull().default(false),
   updatedAt: updatedAt()
 }, (table) => [uniqueIndex("truck_profiles_account_id_unique").on(table.accountId)]);
 var loads = pgTable("loads", {
@@ -428,6 +429,7 @@ async function requireAccount(ctx, sessionToken) {
     throw new Error("Your RigBooks session has ended. Sign in again.");
   return row;
 }
+async function ensurePrePassColumn(_ctx) {}
 function bytesToHex(bytes) {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
 }
@@ -1497,13 +1499,17 @@ var Actions = {
   }),
   listDriverFeed: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, limit: z.number().int().min(1).max(100).default(40) }),
-    response: z.object({ posts: z.array(driverPostSchema), asOf: z.string() }),
+    response: z.object({ posts: z.array(driverPostSchema), memberCount: z.number(), asOf: z.string() }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
       const db = ctx.db();
-      const postRows = await db.select().from(driverPosts).orderBy(desc(driverPosts.createdAt)).limit(args.limit);
+      const [postRows, memberRows] = await Promise.all([
+        db.select().from(driverPosts).orderBy(desc(driverPosts.createdAt)).limit(args.limit),
+        db.select({ id: accounts.id }).from(accounts)
+      ]);
+      const memberCount = memberRows.length;
       if (postRows.length === 0)
-        return { posts: [], asOf: new Date().toISOString() };
+        return { posts: [], memberCount, asOf: new Date().toISOString() };
       const postIds = postRows.map((row) => row.id);
       const [replyRows, likeRows] = await Promise.all([
         db.select().from(driverReplies).where(inArray(driverReplies.postId, postIds)).orderBy(asc(driverReplies.createdAt)),
@@ -1530,7 +1536,7 @@ var Actions = {
           }))
         };
       });
-      return { posts, asOf: new Date().toISOString() };
+      return { posts, memberCount, asOf: new Date().toISOString() };
     }
   }),
   createDriverPost: defineAction({
@@ -1585,30 +1591,32 @@ var Actions = {
   }),
   getTruckProfile: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema }),
-    response: z.object({ configured: z.boolean(), truckName: z.string(), currentOdometer: z.number(), lastPmOdometer: z.number(), pmInterval: z.number(), nextPmDue: z.number(), milesRemaining: z.number(), status: z.enum(["ok", "soon", "due"]), heightInches: z.number(), weightPounds: z.number(), lengthFeet: z.number(), widthInches: z.number() }),
+    response: z.object({ configured: z.boolean(), truckName: z.string(), currentOdometer: z.number(), lastPmOdometer: z.number(), pmInterval: z.number(), nextPmDue: z.number(), milesRemaining: z.number(), status: z.enum(["ok", "soon", "due"]), heightInches: z.number(), weightPounds: z.number(), lengthFeet: z.number(), widthInches: z.number(), hasPrePass: z.boolean() }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
+      await ensurePrePassColumn(ctx);
       const row = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
       if (!row)
-        return { configured: false, truckName: "My truck", currentOdometer: 0, lastPmOdometer: 0, pmInterval: 15000, nextPmDue: 15000, milesRemaining: 15000, status: "ok", heightInches: 162, weightPounds: 80000, lengthFeet: 75, widthInches: 102 };
+        return { configured: false, truckName: "My truck", currentOdometer: 0, lastPmOdometer: 0, pmInterval: 15000, nextPmDue: 15000, milesRemaining: 15000, status: "ok", heightInches: 162, weightPounds: 80000, lengthFeet: 75, widthInches: 102, hasPrePass: false };
       const currentOdometer = row.currentOdometerTenths / 10;
       const lastPmOdometer = row.lastPmOdometerTenths / 10;
       const pmInterval = row.pmIntervalTenths / 10;
       const nextPmDue = lastPmOdometer + pmInterval;
       const milesRemaining = nextPmDue - currentOdometer;
-      return { configured: true, truckName: row.truckName, currentOdometer, lastPmOdometer, pmInterval, nextPmDue, milesRemaining, status: milesRemaining <= 0 ? "due" : milesRemaining <= Math.min(1000, pmInterval * 0.1) ? "soon" : "ok", heightInches: row.heightInches, weightPounds: row.weightPounds, lengthFeet: row.lengthFeet, widthInches: row.widthInches };
+      return { configured: true, truckName: row.truckName, currentOdometer, lastPmOdometer, pmInterval, nextPmDue, milesRemaining, status: milesRemaining <= 0 ? "due" : milesRemaining <= Math.min(1000, pmInterval * 0.1) ? "soon" : "ok", heightInches: row.heightInches, weightPounds: row.weightPounds, lengthFeet: row.lengthFeet, widthInches: row.widthInches, hasPrePass: row.hasPrePass };
     }
   }),
   saveTruckProfile: defineAction({
-    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), currentOdometer: z.number().finite().min(0).max(1e7), lastPmOdometer: z.number().finite().min(0).max(1e7), pmInterval: z.number().finite().positive().max(1e6), heightInches: z.number().int().min(96).max(180).optional(), weightPounds: z.number().int().min(1e4).max(200000).optional(), lengthFeet: z.number().int().min(20).max(150).optional(), widthInches: z.number().int().min(72).max(144).optional() }),
+    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), currentOdometer: z.number().finite().min(0).max(1e7), lastPmOdometer: z.number().finite().min(0).max(1e7), pmInterval: z.number().finite().positive().max(1e6), heightInches: z.number().int().min(96).max(180).optional(), weightPounds: z.number().int().min(1e4).max(200000).optional(), lengthFeet: z.number().int().min(20).max(150).optional(), widthInches: z.number().int().min(72).max(144).optional(), hasPrePass: z.boolean().optional() }),
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
       if (args.lastPmOdometer > args.currentOdometer)
         throw new Error("Last PM reading cannot be higher than the current odometer.");
+      await ensurePrePassColumn(ctx);
       const db = ctx.db();
       const row = (await db.select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
-      const values = { accountId: account.id, truckName: args.truckName.trim(), currentOdometerTenths: Math.round(args.currentOdometer * 10), lastPmOdometerTenths: Math.round(args.lastPmOdometer * 10), pmIntervalTenths: Math.round(args.pmInterval * 10), heightInches: args.heightInches ?? row?.heightInches ?? 162, weightPounds: args.weightPounds ?? row?.weightPounds ?? 80000, lengthFeet: args.lengthFeet ?? row?.lengthFeet ?? 75, widthInches: args.widthInches ?? row?.widthInches ?? 102, updatedAt: new Date };
+      const values = { accountId: account.id, truckName: args.truckName.trim(), currentOdometerTenths: Math.round(args.currentOdometer * 10), lastPmOdometerTenths: Math.round(args.lastPmOdometer * 10), pmIntervalTenths: Math.round(args.pmInterval * 10), heightInches: args.heightInches ?? row?.heightInches ?? 162, weightPounds: args.weightPounds ?? row?.weightPounds ?? 80000, lengthFeet: args.lengthFeet ?? row?.lengthFeet ?? 75, widthInches: args.widthInches ?? row?.widthInches ?? 102, hasPrePass: args.hasPrePass ?? row?.hasPrePass ?? false, updatedAt: new Date };
       if (row)
         await db.update(truckProfiles).set(values).where(eq(truckProfiles.id, row.id));
       else
@@ -1618,13 +1626,14 @@ var Actions = {
     }
   }),
   saveTruckRouteProfile: defineAction({
-    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), heightInches: z.number().int().min(96).max(180), weightPounds: z.number().int().min(1e4).max(200000), lengthFeet: z.number().int().min(20).max(150), widthInches: z.number().int().min(72).max(144) }),
+    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), heightInches: z.number().int().min(96).max(180), weightPounds: z.number().int().min(1e4).max(200000), lengthFeet: z.number().int().min(20).max(150), widthInches: z.number().int().min(72).max(144), hasPrePass: z.boolean() }),
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
+      await ensurePrePassColumn(ctx);
       const db = ctx.db();
       const row = (await db.select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
-      const values = { accountId: account.id, truckName: args.truckName.trim(), heightInches: args.heightInches, weightPounds: args.weightPounds, lengthFeet: args.lengthFeet, widthInches: args.widthInches, currentOdometerTenths: row?.currentOdometerTenths ?? 0, lastPmOdometerTenths: row?.lastPmOdometerTenths ?? 0, pmIntervalTenths: row?.pmIntervalTenths ?? 150000, updatedAt: new Date };
+      const values = { accountId: account.id, truckName: args.truckName.trim(), heightInches: args.heightInches, weightPounds: args.weightPounds, lengthFeet: args.lengthFeet, widthInches: args.widthInches, hasPrePass: args.hasPrePass, currentOdometerTenths: row?.currentOdometerTenths ?? 0, lastPmOdometerTenths: row?.lastPmOdometerTenths ?? 0, pmIntervalTenths: row?.pmIntervalTenths ?? 150000, updatedAt: new Date };
       if (row)
         await db.update(truckProfiles).set(values).where(eq(truckProfiles.id, row.id));
       else
@@ -1640,6 +1649,7 @@ var Actions = {
       const account = await requireAccount(ctx, args.sessionToken);
       if (account.role === "standard")
         throw new Error("Road for Truckers requires RigBooks Pro.");
+      await ensurePrePassColumn(ctx);
       const truck = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
       if (!truck)
         throw new Error("Add your truck profile before planning a route.");
@@ -1757,6 +1767,7 @@ var Actions = {
       } else if (intent === "trip_planning") {
         context = `Trip-planning guidance: Ask for origin, destination, delivery time, planned fuel range, and any special load limits that are missing. Direct the driver to RigBooks Road for a truck route, route weather, truck stops, repair, rest areas, and CAT scales. Remind the driver to confirm truck dimensions in Driver setup, inspect the truck, check fuel and legal HOS availability, review weather and restrictions, and leave a time buffer. Never invent a route, mileage, restriction, or arrival time.`;
       } else if (intent === "maintenance") {
+        await ensurePrePassColumn(ctx);
         const truck = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
         context = truck ? `RigBooks truck profile: ${JSON.stringify({ truckName: truck.truckName, currentOdometer: truck.currentOdometerTenths / 10, lastPmOdometer: truck.lastPmOdometerTenths / 10, pmInterval: truck.pmIntervalTenths / 10, nextPmDue: (truck.lastPmOdometerTenths + truck.pmIntervalTenths) / 10 })}. Explain preventive care clearly. Do not diagnose a dangerous mechanical problem remotely; advise stopping safely and using a qualified mechanic when safety may be affected.` : `No truck maintenance profile is saved yet. Explain how to add current odometer, last PM odometer, and PM interval in Driver setup. Give only general preventive-maintenance guidance and do not diagnose a dangerous mechanical problem remotely; advise stopping safely and using a qualified mechanic when safety may be affected.`;
       } else if (intent === "hos") {
@@ -1905,7 +1916,7 @@ var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql"];
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql"];
 var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
