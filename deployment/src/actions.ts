@@ -1,4 +1,4 @@
-import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
+import { defineAction, z, type ActionsModule, type Ctx } from "./runtime";
 import { and, asc, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
