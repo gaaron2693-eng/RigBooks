@@ -9,7 +9,7 @@ import type { Ctx } from "./runtime";
 
 const databaseUrl = requiredEnv("DATABASE_URL");
 const sessionPepper = requiredEnv("SESSION_PEPPER");
-const openAiApiKey = requiredEnv("OPENAI_API_KEY");
+const openAiApiKey = process.env.OPENAI_API_KEY?.trim() || "";
 const openAiModel = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const port = Number(process.env.PORT || 3000);
 const maxUploadBytes = Number(process.env.MAX_UPLOAD_BYTES || 18_000_000);
@@ -39,6 +39,7 @@ async function toBytes(data: string | ArrayBuffer | ArrayBufferView | Blob): Pro
 }
 
 async function callOpenAI(body: unknown): Promise<any> {
+  if (!openAiApiKey) throw new Error("AI features are not configured on this server (OPENAI_API_KEY is not set).");
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: { Authorization: `Bearer ${openAiApiKey}`, "Content-Type": "application/json" },
