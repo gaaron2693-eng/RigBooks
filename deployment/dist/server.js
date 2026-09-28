@@ -28,7 +28,7 @@ function defineAction(spec) {
 }
 
 // src/actions.ts
-import { and, desc, eq, gte, isNull, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte } from "drizzle-orm";
 
 // src/schema.ts
 var exports_schema = {};
@@ -38,6 +38,9 @@ __export(exports_schema, {
   compInvites: () => compInvites,
   companyProfile: () => companyProfile,
   documents: () => documents,
+  driverPostLikes: () => driverPostLikes,
+  driverPosts: () => driverPosts,
+  driverReplies: () => driverReplies,
   expenses: () => expenses,
   iftaEntries: () => iftaEntries,
   invoices: () => invoices,
@@ -47,7 +50,7 @@ __export(exports_schema, {
   truckProfiles: () => truckProfiles,
   workShifts: () => workShifts
 });
-import { integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { index, integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 var createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 var updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
 var accounts = pgTable("accounts", {
@@ -63,6 +66,25 @@ var accounts = pgTable("accounts", {
   createdAt: createdAt(),
   updatedAt: updatedAt()
 }, (table) => [uniqueIndex("accounts_viewer_fbid_unique").on(table.viewerFbid), uniqueIndex("accounts_email_unique").on(table.email)]);
+var driverPosts = pgTable("driver_posts", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  body: text("body").notNull(),
+  createdAt: createdAt()
+}, (table) => [index("driver_posts_created_at_idx").on(table.createdAt)]);
+var driverReplies = pgTable("driver_replies", {
+  id: serial("id").primaryKey(),
+  postId: integer("post_id").notNull().references(() => driverPosts.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  body: text("body").notNull(),
+  createdAt: createdAt()
+}, (table) => [index("driver_replies_post_created_idx").on(table.postId, table.createdAt)]);
+var driverPostLikes = pgTable("driver_post_likes", {
+  id: serial("id").primaryKey(),
+  postId: integer("post_id").notNull().references(() => driverPosts.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  createdAt: createdAt()
+}, (table) => [uniqueIndex("driver_post_likes_post_account_unique").on(table.postId, table.accountId)]);
 var accountSessions = pgTable("account_sessions", {
   id: serial("id").primaryKey(),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
@@ -345,6 +367,22 @@ var accountSchema = z.object({
   role: accessRoleSchema,
   accessLabel: z.string().nullable(),
   createdAt: z.string()
+});
+var driverReplySchema = z.object({
+  id: z.number(),
+  postId: z.number(),
+  driverName: z.string(),
+  body: z.string(),
+  createdAt: z.string()
+});
+var driverPostSchema = z.object({
+  id: z.number(),
+  driverName: z.string(),
+  body: z.string(),
+  createdAt: z.string(),
+  likeCount: z.number(),
+  likedByViewer: z.boolean(),
+  replies: z.array(driverReplySchema)
 });
 var roadRouteSchema = z.object({
   originLabel: z.string(),
@@ -1457,6 +1495,94 @@ var Actions = {
       return { ok: true };
     }
   }),
+  listDriverFeed: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, limit: z.number().int().min(1).max(100).default(40) }),
+    response: z.object({ posts: z.array(driverPostSchema), asOf: z.string() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const postRows = await db.select().from(driverPosts).orderBy(desc(driverPosts.createdAt)).limit(args.limit);
+      if (postRows.length === 0)
+        return { posts: [], asOf: new Date().toISOString() };
+      const postIds = postRows.map((row) => row.id);
+      const [replyRows, likeRows] = await Promise.all([
+        db.select().from(driverReplies).where(inArray(driverReplies.postId, postIds)).orderBy(asc(driverReplies.createdAt)),
+        db.select().from(driverPostLikes).where(inArray(driverPostLikes.postId, postIds))
+      ]);
+      const accountIds = Array.from(new Set([...postRows.map((row) => row.accountId), ...replyRows.map((row) => row.accountId)]));
+      const accountRows = accountIds.length > 0 ? await db.select({ id: accounts.id, displayName: accounts.displayName }).from(accounts).where(inArray(accounts.id, accountIds)) : [];
+      const names = new Map(accountRows.map((row) => [row.id, row.displayName]));
+      const posts = postRows.map((post) => {
+        const likes = likeRows.filter((like) => like.postId === post.id);
+        return {
+          id: post.id,
+          driverName: names.get(post.accountId) ?? "RigBooks driver",
+          body: post.body,
+          createdAt: post.createdAt.toISOString(),
+          likeCount: likes.length,
+          likedByViewer: likes.some((like) => like.accountId === account.id),
+          replies: replyRows.filter((reply) => reply.postId === post.id).map((reply) => ({
+            id: reply.id,
+            postId: reply.postId,
+            driverName: names.get(reply.accountId) ?? "RigBooks driver",
+            body: reply.body,
+            createdAt: reply.createdAt.toISOString()
+          }))
+        };
+      });
+      return { posts, asOf: new Date().toISOString() };
+    }
+  }),
+  createDriverPost: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, body: z.string().trim().min(1).max(600) }),
+    response: z.object({ id: z.number() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const rows = await ctx.db().insert(driverPosts).values({ accountId: account.id, body: args.body.trim() }).returning({ id: driverPosts.id });
+      const row = rows[0];
+      if (!row)
+        throw new Error("Could not publish that post.");
+      ctx.invalidateQueries();
+      return { id: row.id };
+    }
+  }),
+  createDriverReply: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, postId: z.number().int().positive(), body: z.string().trim().min(1).max(400) }),
+    response: z.object({ id: z.number() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const post = (await db.select({ id: driverPosts.id }).from(driverPosts).where(eq(driverPosts.id, args.postId)).limit(1))[0];
+      if (!post)
+        throw new Error("That post is no longer available.");
+      const rows = await db.insert(driverReplies).values({ postId: args.postId, accountId: account.id, body: args.body.trim() }).returning({ id: driverReplies.id });
+      const row = rows[0];
+      if (!row)
+        throw new Error("Could not publish that reply.");
+      ctx.invalidateQueries();
+      return { id: row.id };
+    }
+  }),
+  toggleDriverPostLike: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, postId: z.number().int().positive() }),
+    response: z.object({ liked: z.boolean() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const post = (await db.select({ id: driverPosts.id }).from(driverPosts).where(eq(driverPosts.id, args.postId)).limit(1))[0];
+      if (!post)
+        throw new Error("That post is no longer available.");
+      const existing = (await db.select({ id: driverPostLikes.id }).from(driverPostLikes).where(and(eq(driverPostLikes.postId, args.postId), eq(driverPostLikes.accountId, account.id))).limit(1))[0];
+      if (existing) {
+        await db.delete(driverPostLikes).where(eq(driverPostLikes.id, existing.id));
+        ctx.invalidateQueries();
+        return { liked: false };
+      }
+      await db.insert(driverPostLikes).values({ postId: args.postId, accountId: account.id });
+      ctx.invalidateQueries();
+      return { liked: true };
+    }
+  }),
   getTruckProfile: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema }),
     response: z.object({ configured: z.boolean(), truckName: z.string(), currentOdometer: z.number(), lastPmOdometer: z.number(), pmInterval: z.number(), nextPmDue: z.number(), milesRemaining: z.number(), status: z.enum(["ok", "soon", "due"]), heightInches: z.number(), weightPounds: z.number(), lengthFeet: z.number(), widthInches: z.number() }),
@@ -1771,7 +1897,7 @@ ${JSON.stringify(result)}`, { schema: z.array(truckingNewsItemSchema).max(10) })
 // src/server.ts
 var databaseUrl = requiredEnv("DATABASE_URL");
 var sessionPepper = requiredEnv("SESSION_PEPPER");
-var openAiApiKey = requiredEnv("OPENAI_API_KEY");
+var openAiApiKey = process.env.OPENAI_API_KEY?.trim() || null;
 var openAiModel = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 var port = Number(process.env.PORT || 3000);
 var maxUploadBytes = Number(process.env.MAX_UPLOAD_BYTES || 18000000);
@@ -1779,7 +1905,8 @@ var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationPath = normalize(join(import.meta.dir, "..", "postgres", "001_initial.sql"));
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql"];
+var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
   if (!value)
@@ -1801,6 +1928,8 @@ async function toBytes(data) {
   return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
 }
 async function callOpenAI(body) {
+  if (!openAiApiKey)
+    throw new Error("AI features are not configured yet.");
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: { Authorization: `Bearer ${openAiApiKey}`, "Content-Type": "application/json" },
@@ -1887,10 +2016,11 @@ async function migrate() {
   try {
     await client.query("SELECT pg_advisory_lock(hashtext('rigbooks-migrations'))");
     await client.query("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
-    const name = "001_initial.sql";
-    const exists = await client.query("SELECT 1 FROM schema_migrations WHERE name=$1", [name]);
-    if (exists.rowCount === 0) {
-      const sql = await readFile(migrationPath, "utf8");
+    for (const name of migrationNames) {
+      const exists = await client.query("SELECT 1 FROM schema_migrations WHERE name=$1", [name]);
+      if ((exists.rowCount ?? 0) > 0)
+        continue;
+      const sql = await readFile(join(migrationRoot, name), "utf8");
       await client.query("BEGIN");
       try {
         await client.query(sql);
