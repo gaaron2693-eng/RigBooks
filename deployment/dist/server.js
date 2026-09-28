@@ -747,6 +747,16 @@ var Actions = {
       return { ok: true };
     }
   }),
+  deleteMyAccount: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      await ctx.db().delete(accounts).where(eq(accounts.id, account.id));
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
   createAccount: defineAction({
     request: z.object({
       displayName: z.string().trim().min(2).max(80),
