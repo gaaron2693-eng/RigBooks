@@ -9,7 +9,7 @@ import type { Ctx } from "./runtime";
 
 const databaseUrl = requiredEnv("DATABASE_URL");
 const sessionPepper = requiredEnv("SESSION_PEPPER");
-const openAiApiKey = process.env.OPENAI_API_KEY?.trim() || "";
+const openAiApiKey = process.env.OPENAI_API_KEY?.trim() || null;
 const openAiModel = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const port = Number(process.env.PORT || 3000);
 const maxUploadBytes = Number(process.env.MAX_UPLOAD_BYTES || 18_000_000);
@@ -17,7 +17,8 @@ const pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes
 const drizzleDb = drizzle(pool, { schema });
 const db = Object.assign(drizzleDb, { batch: async (queries: Array<PromiseLike<unknown>>) => Promise.all(queries) });
 const clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-const migrationPath = normalize(join(import.meta.dir, "..", "postgres", "001_initial.sql"));
+const migrationNames = ["001_initial.sql", "002_driver_community_feed.sql"] as const;
+const migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
@@ -39,7 +40,7 @@ async function toBytes(data: string | ArrayBuffer | ArrayBufferView | Blob): Pro
 }
 
 async function callOpenAI(body: unknown): Promise<any> {
-  if (!openAiApiKey) throw new Error("AI features are not configured on this server (OPENAI_API_KEY is not set).");
+  if (!openAiApiKey) throw new Error("AI features are not configured yet.");
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: { Authorization: `Bearer ${openAiApiKey}`, "Content-Type": "application/json" },
@@ -123,10 +124,10 @@ async function migrate(): Promise<void> {
   try {
     await client.query("SELECT pg_advisory_lock(hashtext('rigbooks-migrations'))");
     await client.query("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
-    const name = "001_initial.sql";
-    const exists = await client.query("SELECT 1 FROM schema_migrations WHERE name=$1", [name]);
-    if (exists.rowCount === 0) {
-      const sql = await readFile(migrationPath, "utf8");
+    for (const name of migrationNames) {
+      const exists = await client.query("SELECT 1 FROM schema_migrations WHERE name=$1", [name]);
+      if ((exists.rowCount ?? 0) > 0) continue;
+      const sql = await readFile(join(migrationRoot, name), "utf8");
       await client.query("BEGIN");
       try { await client.query(sql); await client.query("INSERT INTO schema_migrations(name) VALUES ($1)", [name]); await client.query("COMMIT"); }
       catch (error) { await client.query("ROLLBACK"); throw error; }

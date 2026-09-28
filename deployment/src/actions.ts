@@ -1,5 +1,5 @@
 import { defineAction, z, type ActionsModule, type Ctx } from "./runtime";
-import { and, desc, eq, gte, isNull, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lte } from "drizzle-orm";
 import * as schema from "./schema";
 
 const driverTypeSchema = z.enum(["company_driver", "lease_purchase", "owner_operator", "hourly_driver"]);
@@ -145,6 +145,13 @@ const companyProfileSchema = z.object({
 const accountSchema = z.object({
   id: z.number(), displayName: z.string(), email: z.string().nullable(), authProvider: authProviderSchema,
   role: accessRoleSchema, accessLabel: z.string().nullable(), createdAt: z.string(),
+});
+const driverReplySchema = z.object({
+  id: z.number(), postId: z.number(), driverName: z.string(), body: z.string(), createdAt: z.string(),
+});
+const driverPostSchema = z.object({
+  id: z.number(), driverName: z.string(), body: z.string(), createdAt: z.string(), likeCount: z.number(),
+  likedByViewer: z.boolean(), replies: z.array(driverReplySchema),
 });
 const roadRouteSchema = z.object({
   originLabel: z.string(), destinationLabel: z.string(), distanceMiles: z.number(), durationMinutes: z.number(),
@@ -1244,6 +1251,95 @@ export const Actions = {
       await ctx.db<typeof schema>().update(schema.invoices).set({ status: args.status, sentAt: args.status === "sent" ? new Date() : undefined }).where(and(eq(schema.invoices.id, args.id), eq(schema.invoices.accountId, account.id)));
       ctx.invalidateQueries();
       return { ok: true };
+    },
+  }),
+
+  listDriverFeed: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, limit: z.number().int().min(1).max(100).default(40) }),
+    response: z.object({ posts: z.array(driverPostSchema), asOf: z.string() }),
+    async handler(ctx, args): Promise<{ posts: Array<z.infer<typeof driverPostSchema>>; asOf: string }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const postRows = await db.select().from(schema.driverPosts).orderBy(desc(schema.driverPosts.createdAt)).limit(args.limit);
+      if (postRows.length === 0) return { posts: [], asOf: new Date().toISOString() };
+      const postIds = postRows.map((row) => row.id);
+      const [replyRows, likeRows] = await Promise.all([
+        db.select().from(schema.driverReplies).where(inArray(schema.driverReplies.postId, postIds)).orderBy(asc(schema.driverReplies.createdAt)),
+        db.select().from(schema.driverPostLikes).where(inArray(schema.driverPostLikes.postId, postIds)),
+      ]);
+      const accountIds = Array.from(new Set([...postRows.map((row) => row.accountId), ...replyRows.map((row) => row.accountId)]));
+      const accountRows = accountIds.length > 0
+        ? await db.select({ id: schema.accounts.id, displayName: schema.accounts.displayName }).from(schema.accounts).where(inArray(schema.accounts.id, accountIds))
+        : [];
+      const names = new Map(accountRows.map((row) => [row.id, row.displayName]));
+      const posts = postRows.map((post) => {
+        const likes = likeRows.filter((like) => like.postId === post.id);
+        return {
+          id: post.id,
+          driverName: names.get(post.accountId) ?? "RigBooks driver",
+          body: post.body,
+          createdAt: post.createdAt.toISOString(),
+          likeCount: likes.length,
+          likedByViewer: likes.some((like) => like.accountId === account.id),
+          replies: replyRows.filter((reply) => reply.postId === post.id).map((reply) => ({
+            id: reply.id,
+            postId: reply.postId,
+            driverName: names.get(reply.accountId) ?? "RigBooks driver",
+            body: reply.body,
+            createdAt: reply.createdAt.toISOString(),
+          })),
+        };
+      });
+      return { posts, asOf: new Date().toISOString() };
+    },
+  }),
+
+  createDriverPost: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, body: z.string().trim().min(1).max(600) }),
+    response: z.object({ id: z.number() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const rows = await ctx.db<typeof schema>().insert(schema.driverPosts).values({ accountId: account.id, body: args.body.trim() }).returning({ id: schema.driverPosts.id });
+      const row = rows[0];
+      if (!row) throw new Error("Could not publish that post.");
+      ctx.invalidateQueries();
+      return { id: row.id };
+    },
+  }),
+
+  createDriverReply: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, postId: z.number().int().positive(), body: z.string().trim().min(1).max(400) }),
+    response: z.object({ id: z.number() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const post = (await db.select({ id: schema.driverPosts.id }).from(schema.driverPosts).where(eq(schema.driverPosts.id, args.postId)).limit(1))[0];
+      if (!post) throw new Error("That post is no longer available.");
+      const rows = await db.insert(schema.driverReplies).values({ postId: args.postId, accountId: account.id, body: args.body.trim() }).returning({ id: schema.driverReplies.id });
+      const row = rows[0];
+      if (!row) throw new Error("Could not publish that reply.");
+      ctx.invalidateQueries();
+      return { id: row.id };
+    },
+  }),
+
+  toggleDriverPostLike: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, postId: z.number().int().positive() }),
+    response: z.object({ liked: z.boolean() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const post = (await db.select({ id: schema.driverPosts.id }).from(schema.driverPosts).where(eq(schema.driverPosts.id, args.postId)).limit(1))[0];
+      if (!post) throw new Error("That post is no longer available.");
+      const existing = (await db.select({ id: schema.driverPostLikes.id }).from(schema.driverPostLikes).where(and(eq(schema.driverPostLikes.postId, args.postId), eq(schema.driverPostLikes.accountId, account.id))).limit(1))[0];
+      if (existing) {
+        await db.delete(schema.driverPostLikes).where(eq(schema.driverPostLikes.id, existing.id));
+        ctx.invalidateQueries();
+        return { liked: false };
+      }
+      await db.insert(schema.driverPostLikes).values({ postId: args.postId, accountId: account.id });
+      ctx.invalidateQueries();
+      return { liked: true };
     },
   }),
 

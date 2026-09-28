@@ -1,4 +1,4 @@
-import { integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { index, integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 const updatedAt = () => timestamp("updated_at", { withTimezone: true }).notNull().defaultNow();
@@ -16,6 +16,28 @@ export const accounts = pgTable("accounts", {
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 }, (table) => [uniqueIndex("accounts_viewer_fbid_unique").on(table.viewerFbid), uniqueIndex("accounts_email_unique").on(table.email)]);
+
+export const driverPosts = pgTable("driver_posts", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  body: text("body").notNull(),
+  createdAt: createdAt(),
+}, (table) => [index("driver_posts_created_at_idx").on(table.createdAt)]);
+
+export const driverReplies = pgTable("driver_replies", {
+  id: serial("id").primaryKey(),
+  postId: integer("post_id").notNull().references(() => driverPosts.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  body: text("body").notNull(),
+  createdAt: createdAt(),
+}, (table) => [index("driver_replies_post_created_idx").on(table.postId, table.createdAt)]);
+
+export const driverPostLikes = pgTable("driver_post_likes", {
+  id: serial("id").primaryKey(),
+  postId: integer("post_id").notNull().references(() => driverPosts.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  createdAt: createdAt(),
+}, (table) => [uniqueIndex("driver_post_likes_post_account_unique").on(table.postId, table.accountId)]);
 
 export const accountSessions = pgTable("account_sessions", {
   id: serial("id").primaryKey(),
