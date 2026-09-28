@@ -1,4 +1,4 @@
-import { defineAction, z, type ActionsModule, type Ctx } from "./runtime";
+import { defineAction, z, type ActionsModule, type Ctx } from "@hatch/space-sdk";
 import { and, asc, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
@@ -192,12 +192,20 @@ async function findAccountForToken(ctx: Ctx, token: string | undefined): Promise
 
 async function requireAccount(ctx: Ctx, sessionToken: string): Promise<typeof schema.accounts.$inferSelect> {
   const row = await findAccountForToken(ctx, sessionToken);
-  if (!row) throw new Error("Your RigBooks session has ended. Sign in again.");
+  if (!row) throw new Error("Your RigRevenue session has ended. Sign in again.");
   return row;
 }
 
-// Production PostgreSQL: has_prepass is added by postgres/003_prepass.sql at boot. No-op here.
-async function ensurePrePassColumn(_ctx: Ctx): Promise<void> {}
+let prePassColumnReady = false;
+async function ensurePrePassColumn(ctx: Ctx): Promise<void> {
+  if (prePassColumnReady) return;
+  try {
+    await ctx.db<typeof schema>().run(sql.raw('ALTER TABLE "truck_profiles" ADD COLUMN "has_prepass" integer NOT NULL DEFAULT 0'));
+  } catch (error) {
+    if (!String(error).toLowerCase().includes("duplicate column")) throw error;
+  }
+  prePassColumnReady = true;
+}
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
@@ -428,7 +436,7 @@ export const Actions = {
       }
       const legacy = (await db.select().from(schema.subscriptionAccess).where(eq(schema.subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const inheritedRole: z.infer<typeof accessRoleSchema> = viewer?.isOwner ? "creator" : (legacy?.role ?? "standard");
-      const inheritedLabel = viewer?.isOwner ? "RigBooks creator" : (legacy?.label ?? null);
+      const inheritedLabel = viewer?.isOwner ? "RigRevenue creator" : (legacy?.label ?? null);
       if (account && account.role === "standard" && inheritedRole !== "standard") {
         await db.update(schema.accounts).set({ role: inheritedRole, accessLabel: inheritedLabel, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
         account.role = inheritedRole;
@@ -463,7 +471,7 @@ export const Actions = {
       if (currentAccount) throw new Error("You are already signed in.");
       const legacy = (await db.select().from(schema.subscriptionAccess).where(eq(schema.subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role: z.infer<typeof accessRoleSchema> = viewer?.isOwner ? "creator" : (legacy?.role ?? "standard");
-      const accessLabel = viewer?.isOwner ? "RigBooks creator" : (legacy?.label ?? null);
+      const accessLabel = viewer?.isOwner ? "RigRevenue creator" : (legacy?.label ?? null);
       const salt = crypto.getRandomValues(new Uint8Array(16));
       const passwordSalt = bytesToHex(salt);
       const passwordHash = await derivePasswordHash(args.password, passwordSalt);
@@ -478,7 +486,7 @@ export const Actions = {
         accessLabel,
       }).returning();
       const account = result[0];
-      if (!account) throw new Error("Could not create your RigBooks account.");
+      if (!account) throw new Error("Could not create your RigRevenue account.");
       const sessionToken = await issueSession(ctx, account.id);
       if (role === "creator") await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
@@ -536,13 +544,13 @@ export const Actions = {
     response: accountSchema,
     async handler(ctx, args) {
       const viewer = ctx.viewer;
-      if (!viewer) throw new Error("Sign in to Muse before creating a RigBooks account.");
+      if (!viewer) throw new Error("Sign in to Muse before creating a RigRevenue account.");
       const db = ctx.db<typeof schema>();
       const existing = (await db.select().from(schema.accounts).where(eq(schema.accounts.viewerFbid, viewer.viewerFbid)).limit(1))[0];
       if (existing) return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, createdAt: existing.createdAt.toISOString() };
       const legacy = (await db.select().from(schema.subscriptionAccess).where(eq(schema.subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role: z.infer<typeof accessRoleSchema> = viewer.isOwner ? "creator" : (legacy?.role ?? "standard");
-      const accessLabel = viewer.isOwner ? "RigBooks creator" : (legacy?.label ?? null);
+      const accessLabel = viewer.isOwner ? "RigRevenue creator" : (legacy?.label ?? null);
       const result = await db.insert(schema.accounts).values({
         viewerFbid: viewer.viewerFbid,
         displayName: args.displayName.trim(),
@@ -552,7 +560,7 @@ export const Actions = {
         accessLabel,
       }).returning();
       const account = result[0];
-      if (!account) throw new Error("Could not create your RigBooks account.");
+      if (!account) throw new Error("Could not create your RigRevenue account.");
       if (role === "creator") await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
       return { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, createdAt: account.createdAt.toISOString() };
@@ -604,9 +612,9 @@ export const Actions = {
       const creatorRows = await db.select({ id: schema.accounts.id }).from(schema.accounts).where(eq(schema.accounts.role, "creator")).limit(1);
       const existingCreator = creatorRows[0];
       if (existingCreator && existingCreator.id !== account.id) throw new Error("Creator access has already been claimed.");
-      await db.update(schema.accounts).set({ role: "creator", accessLabel: "RigBooks creator", updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
+      await db.update(schema.accounts).set({ role: "creator", accessLabel: "RigRevenue creator", updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
       const legacyRows = await db.select({ id: schema.subscriptionAccess.id }).from(schema.subscriptionAccess).where(eq(schema.subscriptionAccess.clientId, args.clientId)).limit(1);
-      if (!legacyRows[0]) await db.insert(schema.subscriptionAccess).values({ clientId: args.clientId, role: "creator", label: "RigBooks creator" });
+      if (!legacyRows[0]) await db.insert(schema.subscriptionAccess).values({ clientId: args.clientId, role: "creator", label: "RigRevenue creator" });
       await db.batch([
         db.update(schema.loads).set({ accountId: account.id }).where(isNull(schema.loads.accountId)),
         db.update(schema.expenses).set({ accountId: account.id }).where(isNull(schema.expenses.accountId)),
@@ -1206,7 +1214,7 @@ export const Actions = {
     async handler(ctx, args) {
       const url = new URL("https://nominatim.openstreetmap.org/reverse");
       url.searchParams.set("lat", String(args.lat)); url.searchParams.set("lon", String(args.lng)); url.searchParams.set("format", "jsonv2");
-      const response = await fetch(url, { headers: { "User-Agent": "RigBooks/1.0" } });
+      const response = await fetch(url, { headers: { "User-Agent": "RigRevenue/1.0" } });
       if (!response.ok) throw new Error("Could not identify the state for this GPS segment.");
       const data = await response.json() as { address?: { "ISO3166-2-lvl4"?: string; state_code?: string } };
       const iso = data.address?.["ISO3166-2-lvl4"];
@@ -1294,7 +1302,7 @@ export const Actions = {
         const likes = likeRows.filter((like) => like.postId === post.id);
         return {
           id: post.id,
-          driverName: names.get(post.accountId) ?? "RigBooks driver",
+          driverName: names.get(post.accountId) ?? "RigRevenue driver",
           body: post.body,
           createdAt: post.createdAt.toISOString(),
           likeCount: likes.length,
@@ -1302,7 +1310,7 @@ export const Actions = {
           replies: replyRows.filter((reply) => reply.postId === post.id).map((reply) => ({
             id: reply.id,
             postId: reply.postId,
-            driverName: names.get(reply.accountId) ?? "RigBooks driver",
+            driverName: names.get(reply.accountId) ?? "RigRevenue driver",
             body: reply.body,
             createdAt: reply.createdAt.toISOString(),
           })),
@@ -1412,13 +1420,13 @@ export const Actions = {
     response: roadRouteSchema,
     async handler(ctx, args): Promise<z.infer<typeof roadRouteSchema>> {
       const account = await requireAccount(ctx, args.sessionToken);
-      if (account.role === "standard") throw new Error("Road for Truckers requires RigBooks Pro.");
+      if (account.role === "standard") throw new Error("Road for Truckers requires RigRevenue Pro.");
       await ensurePrePassColumn(ctx);
       const truck = (await ctx.db<typeof schema>().select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
       if (!truck) throw new Error("Add your truck profile before planning a route.");
       const geocode = async (query: string) => {
         const url = new URL("https://nominatim.openstreetmap.org/search"); url.searchParams.set("q", query); url.searchParams.set("format", "jsonv2"); url.searchParams.set("limit", "1");
-        const response = await fetch(url, { headers: { "User-Agent": "RigBooks/1.0" } });
+        const response = await fetch(url, { headers: { "User-Agent": "RigRevenue/1.0" } });
         if (!response.ok) throw new Error("A route location could not be found.");
         const rows = await response.json() as Array<{ lat?: string; lon?: string; display_name?: string }>;
         const row = rows[0]; const lat = Number(row?.lat); const lng = Number(row?.lon);
@@ -1426,7 +1434,7 @@ export const Actions = {
         return { lat, lng, label: row?.display_name ?? query };
       };
       const [origin, destination] = await Promise.all([geocode(args.origin), geocode(args.destination)]);
-      const routeResponse = await fetch("https://valhalla1.openstreetmap.de/route", { method: "POST", headers: { "Content-Type": "application/json", "X-Client-Id": "rigbooks", "User-Agent": "RigBooks/1.0" }, body: JSON.stringify({ locations: [{ lat: origin.lat, lon: origin.lng }, { lat: destination.lat, lon: destination.lng }], costing: "truck", costing_options: { truck: { height: truck.heightInches * 0.0254, width: truck.widthInches * 0.0254, length: truck.lengthFeet * 0.3048, weight: truck.weightPounds * 0.000453592, axle_load: Math.min(20, truck.weightPounds * 0.000453592 / 5), hazmat: false } }, units: "miles", language: "en-US" }) });
+      const routeResponse = await fetch("https://valhalla1.openstreetmap.de/route", { method: "POST", headers: { "Content-Type": "application/json", "X-Client-Id": "rigrevenue", "User-Agent": "RigRevenue/1.0" }, body: JSON.stringify({ locations: [{ lat: origin.lat, lon: origin.lng }, { lat: destination.lat, lon: destination.lng }], costing: "truck", costing_options: { truck: { height: truck.heightInches * 0.0254, width: truck.widthInches * 0.0254, length: truck.lengthFeet * 0.3048, weight: truck.weightPounds * 0.000453592, axle_load: Math.min(20, truck.weightPounds * 0.000453592 / 5), hazmat: false } }, units: "miles", language: "en-US" }) });
       if (!routeResponse.ok) throw new Error("A truck-safe route could not be calculated right now.");
       const routeData = await routeResponse.json() as { trip?: { summary?: { length?: number; time?: number }; legs?: Array<{ shape?: string; maneuvers?: Array<{ instruction?: string; length?: number; time?: number }> }> } };
       const leg = routeData.trip?.legs?.[0]; const summary = routeData.trip?.summary;
@@ -1436,7 +1444,7 @@ export const Actions = {
       const around = `(around:50000,${midpoint.lat},${midpoint.lng})`;
       const overpassQuery = `[out:json][timeout:20];(nwr["amenity"="truck_stop"]${around};nwr["amenity"="weighbridge"]["brand"~"CAT",i]${around};nwr["amenity"="weighbridge"]["name"~"CAT Scale",i]${around};);out center tags;`;
       let elements: OverpassElement[] = [];
-      try { const response = await fetch("https://overpass-api.de/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigBooks/1.0" }, body: new URLSearchParams({ data: overpassQuery }) }); if (response.ok) elements = ((await response.json()) as { elements?: OverpassElement[] }).elements ?? []; } catch { elements = []; }
+      try { const response = await fetch("https://overpass-api.de/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigRevenue/1.0" }, body: new URLSearchParams({ data: overpassQuery }) }); if (response.ok) elements = ((await response.json()) as { elements?: OverpassElement[] }).elements ?? []; } catch { elements = []; }
       const truckStops = elements.flatMap((element) => {
         const lat = element.lat ?? element.center?.lat; const lng = element.lon ?? element.center?.lon; if (typeof lat !== "number" || typeof lng !== "number") return [];
         const nearest = shape.filter((_, index) => index % 10 === 0).reduce((best, point) => Math.min(best, distanceMiles(point.lat, point.lng, lat, lng)), Number.POSITIVE_INFINITY);
@@ -1468,16 +1476,16 @@ export const Actions = {
       }
 
       const intent = await ctx.inference.complete(
-        `Classify this question for Sam the Semi, RigBooks' in-app assistant. Choose exactly one scope: app_help (how to use RigBooks), driver_data (the signed-in driver's loads, expenses, earnings, settlements, deductions, or profit), weather (current or forecast road weather), diesel (diesel prices), trip_planning (planning a safe, efficient truck trip or pre-trip readiness), maintenance (truck maintenance, PM timing, inspections, or mechanical care), hos (hours-of-service rules, clocks, breaks, sleeper berth, or logs), trucking_terms (definitions of trucking language, pay terms, or industry shorthand), prayer (a driver asks for a prayer or spiritual encouragement), or out_of_scope. Message: ${args.message}`,
+        `Classify this question for Sam the Semi, RigRevenue' in-app assistant. Choose exactly one scope: app_help (how to use RigRevenue), driver_data (the signed-in driver's loads, expenses, earnings, settlements, deductions, or profit), weather (current or forecast road weather), diesel (diesel prices), trip_planning (planning a safe, efficient truck trip or pre-trip readiness), maintenance (truck maintenance, PM timing, inspections, or mechanical care), hos (hours-of-service rules, clocks, breaks, sleeper berth, or logs), trucking_terms (definitions of trucking language, pay terms, or industry shorthand), prayer (a driver asks for a prayer or spiritual encouragement), or out_of_scope. Message: ${args.message}`,
         { schema: samScopeSchema.exclude(["courtesy"]) },
       );
-      if (intent === "out_of_scope") return { reply: "I can help with RigBooks, your numbers, trip planning, maintenance, HOS, trucking terms, road weather, diesel prices, and prayers. Pick a topic above or ask me in your own words.", scope: intent, sources: [] };
+      if (intent === "out_of_scope") return { reply: "I can help with RigRevenue, your numbers, trip planning, maintenance, HOS, trucking terms, road weather, diesel prices, and prayers. Pick a topic above or ask me in your own words.", scope: intent, sources: [] };
 
       let context = "";
       let sources: Array<{ title: string; url: string }> = [];
       let searchBackedAnswer = false;
       if (intent === "app_help") {
-        context = `RigBooks guide: Overview shows gross, expenses, net, miles and profit per mile. Loads logs a run manually or from a rate-con photo. Expenses stores fuel and costs with receipt images. Roadside finds truck stops, repair and rest areas. Business is for owner-operators and has load boards, IFTA, invoices, document vault, My Company and news. Driver setup holds account, membership, profile and pay defaults. Lease-purchase supports percentage or per-mile settlement pay plus weekly truck payment, maintenance escrow, insurance and other deductions. Offline entries queue on the device and sync when online.`;
+        context = `RigRevenue guide: Overview shows gross, expenses, net, miles and profit per mile. Loads logs a run manually or from a rate-con photo. Expenses stores fuel and costs with receipt images. Roadside finds truck stops, repair and rest areas. Business is for owner-operators and has load boards, IFTA, invoices, document vault, My Company and news. Driver setup holds account, membership, profile and pay defaults. Lease-purchase supports percentage or per-mile settlement pay plus weekly truck payment, maintenance escrow, insurance and other deductions. Offline entries queue on the device and sync when online.`;
       } else if (intent === "driver_data") {
         const db = ctx.db<typeof schema>();
         const [loadRows, expenseRows, payRows] = await Promise.all([
@@ -1496,7 +1504,7 @@ export const Actions = {
           try {
             const url = new URL("https://nominatim.openstreetmap.org/reverse");
             url.searchParams.set("lat", String(args.lat)); url.searchParams.set("lon", String(args.lng)); url.searchParams.set("format", "jsonv2");
-            const response = await fetch(url, { headers: { "User-Agent": "RigBooks/1.0" } });
+            const response = await fetch(url, { headers: { "User-Agent": "RigRevenue/1.0" } });
             const data = response.ok ? await response.json() as { display_name?: string } : null;
             place = data?.display_name ?? `${args.lat}, ${args.lng}`;
           } catch { place = `${args.lat}, ${args.lng}`; }
@@ -1504,24 +1512,24 @@ export const Actions = {
         const search = await ctx.tool.web_search(`current cheapest diesel prices truck stops near or along ${place}; driver request: ${args.message}`);
         context = `Current web search results for diesel prices: ${JSON.stringify(search)}`;
       } else if (intent === "trip_planning") {
-        context = `Trip-planning guidance: Ask for origin, destination, delivery time, planned fuel range, and any special load limits that are missing. Direct the driver to RigBooks Road for a truck route, route weather, truck stops, repair, rest areas, and CAT scales. Remind the driver to confirm truck dimensions in Driver setup, inspect the truck, check fuel and legal HOS availability, review weather and restrictions, and leave a time buffer. Never invent a route, mileage, restriction, or arrival time.`;
+        context = `Trip-planning guidance: Ask for origin, destination, delivery time, planned fuel range, and any special load limits that are missing. Direct the driver to RigRevenue Road for a truck route, route weather, truck stops, repair, rest areas, and CAT scales. Remind the driver to confirm truck dimensions in Driver setup, inspect the truck, check fuel and legal HOS availability, review weather and restrictions, and leave a time buffer. Never invent a route, mileage, restriction, or arrival time.`;
       } else if (intent === "maintenance") {
         await ensurePrePassColumn(ctx);
         const truck = (await ctx.db<typeof schema>().select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
         context = truck
-          ? `RigBooks truck profile: ${JSON.stringify({ truckName: truck.truckName, currentOdometer: truck.currentOdometerTenths / 10, lastPmOdometer: truck.lastPmOdometerTenths / 10, pmInterval: truck.pmIntervalTenths / 10, nextPmDue: (truck.lastPmOdometerTenths + truck.pmIntervalTenths) / 10 })}. Explain preventive care clearly. Do not diagnose a dangerous mechanical problem remotely; advise stopping safely and using a qualified mechanic when safety may be affected.`
+          ? `RigRevenue truck profile: ${JSON.stringify({ truckName: truck.truckName, currentOdometer: truck.currentOdometerTenths / 10, lastPmOdometer: truck.lastPmOdometerTenths / 10, pmInterval: truck.pmIntervalTenths / 10, nextPmDue: (truck.lastPmOdometerTenths + truck.pmIntervalTenths) / 10 })}. Explain preventive care clearly. Do not diagnose a dangerous mechanical problem remotely; advise stopping safely and using a qualified mechanic when safety may be affected.`
           : `No truck maintenance profile is saved yet. Explain how to add current odometer, last PM odometer, and PM interval in Driver setup. Give only general preventive-maintenance guidance and do not diagnose a dangerous mechanical problem remotely; advise stopping safely and using a qualified mechanic when safety may be affected.`;
       } else if (intent === "hos") {
         const search = await ctx.tool.web_search(`current official FMCSA hours of service rules property-carrying commercial drivers; driver question: ${args.message}`);
         context = `Current web search results about federal HOS rules: ${JSON.stringify(search)}`;
         searchBackedAnswer = true;
       } else if (intent === "trucking_terms") {
-        context = `Explain trucking terminology in plain driver language. Common RigBooks-relevant terms include deadhead (unpaid or non-revenue miles driven without a load), detention (time held beyond an agreed free period), lumper (a third-party loading or unloading service), rate confirmation (the written load terms and agreed carrier pay), gross (money before expenses or deductions), net (money after expenses or deductions), and profit per mile (net divided by all miles). If asked about a term not safely known, say so rather than guessing.`;
+        context = `Explain trucking terminology in plain driver language. Common RigRevenue-relevant terms include deadhead (unpaid or non-revenue miles driven without a load), detention (time held beyond an agreed free period), lumper (a third-party loading or unloading service), rate confirmation (the written load terms and agreed carrier pay), gross (money before expenses or deductions), net (money after expenses or deductions), and profit per mile (net divided by all miles). If asked about a term not safely known, say so rather than guessing.`;
       } else if (intent === "prayer") {
         context = `Offer a brief, sincere Christian prayer suitable for a truck driver. Match the requested moment—before a trip, after a safe arrival, for family at home, during stress, or at bedtime. Do not claim guaranteed protection or outcomes. Keep it warm and respectful.`;
       }
 
-      const prompt = `You are Sam the Semi, a friendly, concise, trucker-aware assistant inside RigBooks. Answer only within the selected scope: ${intent}. Use the supplied context only; do not invent values, prices, conditions, routes, rules, or app behavior. For driver data, calculate exactly from the rows and clearly state the date range used. For diesel, include specific stations and prices only when the search context explicitly supports them; otherwise say live prices were not available and suggest trying a route or current location. For weather, emphasize hazards relevant to driving. For HOS, make clear that the answer is general guidance, use the current search context, and tell the driver to verify their operation and exceptions with FMCSA or their carrier. Keep the answer under 140 words. Conversation: ${JSON.stringify(args.history)}. Driver question: ${args.message}. Context: ${context}`;
+      const prompt = `You are Sam the Semi, a friendly, concise, trucker-aware assistant inside RigRevenue. Answer only within the selected scope: ${intent}. Use the supplied context only; do not invent values, prices, conditions, routes, rules, or app behavior. For driver data, calculate exactly from the rows and clearly state the date range used. For diesel, include specific stations and prices only when the search context explicitly supports them; otherwise say live prices were not available and suggest trying a route or current location. For weather, emphasize hazards relevant to driving. For HOS, make clear that the answer is general guidance, use the current search context, and tell the driver to verify their operation and exceptions with FMCSA or their carrier. Keep the answer under 140 words. Conversation: ${JSON.stringify(args.history)}. Driver question: ${args.message}. Context: ${context}`;
       if (searchBackedAnswer) {
         const result = await ctx.inference.complete(
           `${prompt} Return up to three useful source links only when their complete URLs appear verbatim in the search context; otherwise return no sources.`,
@@ -1577,7 +1585,7 @@ export const Actions = {
       searchUrl.searchParams.set("q", args.pickup);
       searchUrl.searchParams.set("format", "jsonv2");
       searchUrl.searchParams.set("limit", "1");
-      const geocodeResponse = await fetch(searchUrl, { headers: { "User-Agent": "RigBooks/1.0" } });
+      const geocodeResponse = await fetch(searchUrl, { headers: { "User-Agent": "RigRevenue/1.0" } });
       if (!geocodeResponse.ok) throw new Error("Pickup location could not be found.");
       const candidates = await geocodeResponse.json() as Array<{ lat?: string; lon?: string; display_name?: string }>;
       const pickup = candidates[0];
@@ -1585,7 +1593,7 @@ export const Actions = {
       const pickupLng = Number(pickup?.lon);
       if (!Number.isFinite(pickupLat) || !Number.isFinite(pickupLng)) throw new Error("Pickup location could not be found.");
       const routeUrl = `https://router.project-osrm.org/route/v1/driving/${args.currentLng},${args.currentLat};${pickupLng},${pickupLat}?overview=false`;
-      const routeResponse = await fetch(routeUrl, { headers: { "User-Agent": "RigBooks/1.0" } });
+      const routeResponse = await fetch(routeUrl, { headers: { "User-Agent": "RigRevenue/1.0" } });
       if (!routeResponse.ok) throw new Error("Deadhead route could not be calculated.");
       const routeData = await routeResponse.json() as { code?: string; routes?: Array<{ distance?: number }> };
       const meters = routeData.routes?.[0]?.distance;
@@ -1615,7 +1623,7 @@ export const Actions = {
         try {
           const response = await fetch(endpoint, {
             method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigBooks/1.0" },
+            headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigRevenue/1.0" },
             body: new URLSearchParams({ data: query }),
           });
           if (!response.ok) continue;

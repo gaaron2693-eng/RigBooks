@@ -197,4 +197,4 @@ const server = Bun.serve({
   },
 });
 
-console.log(`RigBooks listening on ${server.url}`);
+console.log(`RigRevenue listening on ${server.url}`);
