@@ -52,6 +52,22 @@ export const driverPostLikes = pgTable("driver_post_likes", {
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
 }, (table) => [uniqueIndex("driver_post_likes_post_account_unique").on(table.postId, table.accountId)]);
 
+export const hosStatusEvents = pgTable("hos_status_events", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  status: text("status", { enum: ["off_duty", "sleeper", "driving", "on_duty"] }).notNull(),
+  startedAt: timestamp("started_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [index("hos_status_events_account_started_idx").on(table.accountId, table.startedAt)]);
+
+export const hosSettings = pgTable("hos_settings", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  motionPromptMinutes: integer("motion_prompt_minutes").notNull().default(5),
+  gpsPromptsEnabled: boolean("gps_prompts_enabled").notNull().default(true),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [uniqueIndex("hos_settings_account_id_unique").on(table.accountId)]);
+
 export const truckProfiles = pgTable("truck_profiles", {
   id: serial("id").primaryKey(),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
