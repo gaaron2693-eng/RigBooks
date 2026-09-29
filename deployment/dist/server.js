@@ -16,13 +16,20 @@ var __export = (target, all) => {
 
 // src/server.ts
 import { readFile } from "fs/promises";
+import { timingSafeEqual } from "crypto";
 import { extname, join, normalize } from "path";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { eq as eq2 } from "drizzle-orm";
 import { Pool } from "pg";
 import { z as z2 } from "zod";
 
+// src/runtime.ts
+import { z } from "zod";
+function defineAction(spec) {
+  return spec;
+}
+
 // src/actions.ts
-import { defineAction, z } from "@hatch/space-sdk";
 import { and, asc, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 
 // src/schema.ts
@@ -36,18 +43,26 @@ __export(exports_schema, {
   driverPostLikes: () => driverPostLikes,
   driverPosts: () => driverPosts,
   driverReplies: () => driverReplies,
+  dvirDefects: () => dvirDefects,
+  dvirReports: () => dvirReports,
   expenses: () => expenses,
+  hosDailyCertifications: () => hosDailyCertifications,
+  hosEventAnnotations: () => hosEventAnnotations,
+  hosEventEdits: () => hosEventEdits,
+  hosSettings: () => hosSettings,
+  hosStatusEvents: () => hosStatusEvents,
   iftaEntries: () => iftaEntries,
   invoices: () => invoices,
   loads: () => loads,
   paySettings: () => paySettings,
+  stripeSubscriptions: () => stripeSubscriptions,
   subscriptionAccess: () => subscriptionAccess,
   truckProfiles: () => truckProfiles,
   workShifts: () => workShifts
 });
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
-var accounts = sqliteTable("accounts", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+import { boolean, index, integer, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+var accounts = pgTable("accounts", {
+  id: serial("id").primaryKey(),
   viewerFbid: text("viewer_fbid").notNull(),
   displayName: text("display_name").notNull(),
   email: text("email"),
@@ -56,40 +71,102 @@ var accounts = sqliteTable("accounts", {
   passwordSalt: text("password_salt"),
   role: text("role", { enum: ["standard", "creator", "tester"] }).notNull().default("standard"),
   accessLabel: text("access_label"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [
   uniqueIndex("accounts_viewer_fbid_unique").on(table.viewerFbid),
   uniqueIndex("accounts_email_unique").on(table.email)
 ]);
-var accountSessions = sqliteTable("account_sessions", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var accountSessions = pgTable("account_sessions", {
+  id: serial("id").primaryKey(),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
   sessionTokenHash: text("session_token_hash").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date),
-  lastUsedAt: integer("last_used_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
+  lastUsedAt: timestamp("last_used_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [uniqueIndex("account_sessions_token_hash_unique").on(table.sessionTokenHash)]);
-var driverPosts = sqliteTable("driver_posts", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var driverPosts = pgTable("driver_posts", {
+  id: serial("id").primaryKey(),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
   body: text("body").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [index("driver_posts_created_at_idx").on(table.createdAt)]);
-var driverReplies = sqliteTable("driver_replies", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var driverReplies = pgTable("driver_replies", {
+  id: serial("id").primaryKey(),
   postId: integer("post_id").notNull().references(() => driverPosts.id, { onDelete: "cascade" }),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
   body: text("body").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [index("driver_replies_post_created_idx").on(table.postId, table.createdAt)]);
-var driverPostLikes = sqliteTable("driver_post_likes", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var driverPostLikes = pgTable("driver_post_likes", {
+  id: serial("id").primaryKey(),
   postId: integer("post_id").notNull().references(() => driverPosts.id, { onDelete: "cascade" }),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [uniqueIndex("driver_post_likes_post_account_unique").on(table.postId, table.accountId)]);
-var truckProfiles = sqliteTable("truck_profiles", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var hosStatusEvents = pgTable("hos_status_events", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  status: text("status", { enum: ["off_duty", "sleeper", "driving", "on_duty"] }).notNull(),
+  startedAt: timestamp("started_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [index("hos_status_events_account_started_idx").on(table.accountId, table.startedAt)]);
+var hosSettings = pgTable("hos_settings", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  motionPromptMinutes: integer("motion_prompt_minutes").notNull().default(5),
+  gpsPromptsEnabled: boolean("gps_prompts_enabled").notNull().default(true),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [uniqueIndex("hos_settings_account_id_unique").on(table.accountId)]);
+var hosEventAnnotations = pgTable("hos_event_annotations", {
+  id: serial("id").primaryKey(),
+  eventId: integer("event_id").notNull().references(() => hosStatusEvents.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  body: text("body").notNull(),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [index("hos_event_annotations_event_idx").on(table.eventId, table.createdAt)]);
+var hosEventEdits = pgTable("hos_event_edits", {
+  id: serial("id").primaryKey(),
+  eventId: integer("event_id").notNull().references(() => hosStatusEvents.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  originalStatus: text("original_status", { enum: ["off_duty", "sleeper", "driving", "on_duty"] }).notNull(),
+  newStatus: text("new_status", { enum: ["off_duty", "sleeper", "driving", "on_duty"] }).notNull(),
+  originalStartedAt: timestamp("original_started_at", { mode: "date", withTimezone: true }).notNull(),
+  newStartedAt: timestamp("new_started_at", { mode: "date", withTimezone: true }).notNull(),
+  reason: text("reason").notNull(),
+  editedBy: text("edited_by").notNull(),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [index("hos_event_edits_event_idx").on(table.eventId, table.createdAt)]);
+var hosDailyCertifications = pgTable("hos_daily_certifications", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  logDate: text("log_date").notNull(),
+  signedBy: text("signed_by").notNull(),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [uniqueIndex("hos_daily_certifications_account_date_unique").on(table.accountId, table.logDate)]);
+var dvirReports = pgTable("dvir_reports", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  reportType: text("report_type", { enum: ["pre_trip", "post_trip"] }).notNull(),
+  odometerTenths: integer("odometer_tenths").notNull(),
+  signedBy: text("signed_by").notNull(),
+  noDefects: boolean("no_defects").notNull().default(false),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [index("dvir_reports_account_created_idx").on(table.accountId, table.createdAt)]);
+var dvirDefects = pgTable("dvir_defects", {
+  id: serial("id").primaryKey(),
+  reportId: integer("report_id").notNull().references(() => dvirReports.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  component: text("component").notNull(),
+  note: text("note"),
+  photoBlobKey: text("photo_blob_key"),
+  repairRequired: boolean("repair_required").notNull().default(false),
+  repairedAt: timestamp("repaired_at", { mode: "date", withTimezone: true }),
+  repairSignedBy: text("repair_signed_by"),
+  repairNote: text("repair_note"),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [index("dvir_defects_account_repair_idx").on(table.accountId, table.repairedAt)]);
+var truckProfiles = pgTable("truck_profiles", {
+  id: serial("id").primaryKey(),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
   truckName: text("truck_name").notNull(),
   currentOdometerTenths: integer("current_odometer_tenths").notNull(),
@@ -99,11 +176,11 @@ var truckProfiles = sqliteTable("truck_profiles", {
   weightPounds: integer("weight_pounds").notNull().default(80000),
   lengthFeet: integer("length_feet").notNull().default(75),
   widthInches: integer("width_inches").notNull().default(102),
-  hasPrePass: integer("has_prepass", { mode: "boolean" }).notNull().default(false),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  hasPrePass: boolean("has_prepass").notNull().default(false),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [uniqueIndex("truck_profiles_account_id_unique").on(table.accountId)]);
-var loads = sqliteTable("loads", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var loads = pgTable("loads", {
+  id: serial("id").primaryKey(),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   reference: text("reference"),
   broker: text("broker"),
@@ -118,10 +195,10 @@ var loads = sqliteTable("loads", {
   payPercentBasisPoints: integer("pay_percent_basis_points"),
   perMileRateCents: integer("per_mile_rate_cents"),
   notes: text("notes"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 });
-var paySettings = sqliteTable("pay_settings", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var paySettings = pgTable("pay_settings", {
+  id: serial("id").primaryKey(),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   driverType: text("driver_type", { enum: ["company_driver", "lease_purchase", "owner_operator", "hourly_driver"] }).notNull(),
   vehicleType: text("vehicle_type", { enum: ["dump_truck", "cement_mixer", "straight_truck", "hotshot", "tractor_trailer"] }),
@@ -133,36 +210,36 @@ var paySettings = sqliteTable("pay_settings", {
   weeklyMaintenanceEscrowCents: integer("weekly_maintenance_escrow_cents").notNull().default(0),
   weeklyInsuranceCents: integer("weekly_insurance_cents").notNull().default(0),
   weeklyOtherDeductionsCents: integer("weekly_other_deductions_cents").notNull().default(0),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 });
-var workShifts = sqliteTable("work_shifts", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var workShifts = pgTable("work_shifts", {
+  id: serial("id").primaryKey(),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
   workDate: text("work_date").notNull(),
-  clockInAt: integer("clock_in_at", { mode: "timestamp_ms" }).notNull(),
-  clockOutAt: integer("clock_out_at", { mode: "timestamp_ms" }),
+  clockInAt: timestamp("clock_in_at", { mode: "date", withTimezone: true }).notNull(),
+  clockOutAt: timestamp("clock_out_at", { mode: "date", withTimezone: true }),
   notes: text("notes"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 });
-var subscriptionAccess = sqliteTable("subscription_access", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var subscriptionAccess = pgTable("subscription_access", {
+  id: serial("id").primaryKey(),
   clientId: text("client_id").notNull(),
   role: text("role", { enum: ["creator", "tester"] }).notNull(),
   label: text("label"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [uniqueIndex("subscription_access_client_id_unique").on(table.clientId)]);
-var compInvites = sqliteTable("comp_invites", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var compInvites = pgTable("comp_invites", {
+  id: serial("id").primaryKey(),
   codeHash: text("code_hash").notNull(),
   codeHint: text("code_hint").notNull(),
   label: text("label").notNull(),
   createdByClientId: text("created_by_client_id").notNull(),
   redeemedByClientId: text("redeemed_by_client_id"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date),
-  redeemedAt: integer("redeemed_at", { mode: "timestamp_ms" })
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
+  redeemedAt: timestamp("redeemed_at", { mode: "date", withTimezone: true })
 }, (table) => [uniqueIndex("comp_invites_code_hash_unique").on(table.codeHash)]);
-var expenses = sqliteTable("expenses", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var expenses = pgTable("expenses", {
+  id: serial("id").primaryKey(),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   category: text("category", {
     enum: ["fuel", "tolls", "maintenance", "insurance", "truck_payment", "other"]
@@ -173,10 +250,10 @@ var expenses = sqliteTable("expenses", {
   gallonsThousandths: integer("gallons_thousandths"),
   fuelState: text("fuel_state"),
   receiptBlobKey: text("receipt_blob_key"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 });
-var iftaEntries = sqliteTable("ifta_entries", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var iftaEntries = pgTable("ifta_entries", {
+  id: serial("id").primaryKey(),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   loadId: integer("load_id").references(() => loads.id, { onDelete: "cascade" }),
   stateCode: text("state_code").notNull(),
@@ -184,10 +261,10 @@ var iftaEntries = sqliteTable("ifta_entries", {
   gallonsThousandths: integer("gallons_thousandths").notNull().default(0),
   source: text("source", { enum: ["load", "gps", "manual", "fuel"] }).notNull(),
   entryDate: text("entry_date").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 });
-var invoices = sqliteTable("invoices", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var invoices = pgTable("invoices", {
+  id: serial("id").primaryKey(),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   loadId: integer("load_id").notNull().references(() => loads.id, { onDelete: "cascade" }),
   invoiceNumber: text("invoice_number").notNull(),
@@ -195,11 +272,11 @@ var invoices = sqliteTable("invoices", {
   dueDate: text("due_date").notNull(),
   status: text("status", { enum: ["draft", "sent", "paid"] }).notNull().default("draft"),
   notes: text("notes"),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date),
-  sentAt: integer("sent_at", { mode: "timestamp_ms" })
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
+  sentAt: timestamp("sent_at", { mode: "date", withTimezone: true })
 }, (table) => [uniqueIndex("invoices_invoice_number_unique").on(table.invoiceNumber)]);
-var documents = sqliteTable("documents", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var documents = pgTable("documents", {
+  id: serial("id").primaryKey(),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   title: text("title").notNull(),
   category: text("category", { enum: ["bol", "insurance", "registration", "other"] }).notNull(),
@@ -207,10 +284,10 @@ var documents = sqliteTable("documents", {
   blobKey: text("blob_key").notNull(),
   mimeType: text("mime_type").notNull(),
   filename: text("filename").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 });
-var companyProfile = sqliteTable("company_profile", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
+var companyProfile = pgTable("company_profile", {
+  id: serial("id").primaryKey(),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   companyName: text("company_name").notNull(),
   address: text("address"),
@@ -220,8 +297,23 @@ var companyProfile = sqliteTable("company_profile", {
   mcNumber: text("mc_number"),
   dotNumber: text("dot_number"),
   logoBlobKey: text("logo_blob_key"),
-  updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date)
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 });
+var stripeSubscriptions = pgTable("stripe_subscriptions", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  stripeCustomerId: text("stripe_customer_id").notNull(),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  plan: text("plan", { enum: ["weekly", "monthly", "yearly"] }),
+  status: text("status").notNull().default("none"),
+  currentPeriodEnd: timestamp("current_period_end", { mode: "date", withTimezone: true }),
+  cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [
+  uniqueIndex("stripe_subscriptions_account_id_unique").on(table.accountId),
+  uniqueIndex("stripe_subscriptions_stripe_subscription_id_unique").on(table.stripeSubscriptionId)
+]);
 
 // src/actions.ts
 var driverTypeSchema = z.enum(["company_driver", "lease_purchase", "owner_operator", "hourly_driver"]);
@@ -232,6 +324,34 @@ var authProviderSchema = z.enum(["google", "apple", "muse", "email"]);
 var clientIdSchema = z.string().trim().min(16).max(128);
 var emailSchema = z.string().trim().email().max(160);
 var passwordSchema = z.string().min(10).max(128);
+var hosStatusSchema = z.enum(["off_duty", "sleeper", "driving", "on_duty"]);
+var hosEventSchema = z.object({ id: z.number(), status: hosStatusSchema, startedAt: z.string() });
+var hosDetailedEventSchema = hosEventSchema.extend({
+  createdAt: z.string(),
+  annotations: z.array(z.object({ id: z.number(), body: z.string(), createdAt: z.string() })),
+  edits: z.array(z.object({ id: z.number(), originalStatus: hosStatusSchema, newStatus: hosStatusSchema, originalStartedAt: z.string(), newStartedAt: z.string(), reason: z.string(), editedBy: z.string(), createdAt: z.string() }))
+});
+var dvirComponentSchema = z.enum(["service_brakes", "parking_brake", "steering_mechanism", "lighting_reflectors", "tires", "horn", "windshield_wipers", "rear_vision_mirrors", "coupling_devices", "wheels_rims", "emergency_equipment"]);
+var dvirDefectSchema = z.object({
+  id: z.number(),
+  component: dvirComponentSchema,
+  note: z.string().nullable(),
+  photoUrl: z.string().nullable(),
+  repairRequired: z.boolean(),
+  repairedAt: z.string().nullable(),
+  repairSignedBy: z.string().nullable(),
+  repairNote: z.string().nullable(),
+  createdAt: z.string()
+});
+var dvirReportSchema = z.object({
+  id: z.number(),
+  reportType: z.enum(["pre_trip", "post_trip"]),
+  odometer: z.number(),
+  signedBy: z.string(),
+  noDefects: z.boolean(),
+  createdAt: z.string(),
+  defects: z.array(dvirDefectSchema)
+});
 var sessionTokenSchema = z.string().regex(/^[a-f0-9]{64}$/);
 var samScopeSchema = z.enum([
   "app_help",
@@ -393,8 +513,14 @@ var roadRouteSchema = z.object({
   truckStops: z.array(truckPlaceSchema),
   attribution: z.string()
 });
-async function findAccountForViewer(ctx, viewerFbid) {
-  return (await ctx.db().select().from(accounts).where(eq(accounts.viewerFbid, viewerFbid)).limit(1))[0];
+function viewerIdentity(viewer) {
+  return viewer.source === "local" ? `local:${viewer.userId}` : viewer.viewerFbid;
+}
+function viewerDisplayName(viewer) {
+  return viewer?.source === "cloudflare" ? viewer.displayName ?? null : null;
+}
+async function findAccountForViewer(ctx, viewer) {
+  return (await ctx.db().select().from(accounts).where(eq(accounts.viewerFbid, viewerIdentity(viewer))).limit(1))[0];
 }
 async function hashSessionToken(token) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
@@ -426,6 +552,62 @@ async function requireAccount(ctx, sessionToken) {
   if (!row)
     throw new Error("Your RigRevenue session has ended. Sign in again.");
   return row;
+}
+var stripeTestPriceByPlan = {
+  weekly: "price_1UKtygLTe9osv09oYHxPoJys",
+  monthly: "price_1UKtyhLTe9osv09owS82qxkq",
+  yearly: "price_1UKtyiLTe9osv09oFHCbM89H"
+};
+var stripeTestPlanByPrice = {
+  price_1UKtygLTe9osv09oYHxPoJys: "weekly",
+  price_1UKtyhLTe9osv09owS82qxkq: "monthly",
+  price_1UKtyiLTe9osv09oFHCbM89H: "yearly"
+};
+var planSchema = z.enum(["weekly", "monthly", "yearly"]);
+function stripeSecretKey() {
+  const key = process.env.STRIPE_SECRET_KEY?.trim();
+  if (!key)
+    throw new Error("Stripe payments are not connected yet.");
+  if (!key.startsWith("sk_test_"))
+    throw new Error("Stripe is not in test mode.");
+  return key;
+}
+function stripeAuthHeader(key) {
+  return `Basic ${Buffer.from(`${key}:`).toString("base64")}`;
+}
+async function stripeApi(path, method, params) {
+  const key = stripeSecretKey();
+  const response = await fetch(`https://api.stripe.com/v1${path}`, {
+    method,
+    headers: { Authorization: stripeAuthHeader(key), "Content-Type": "application/x-www-form-urlencoded" },
+    body: method === "POST" ? new URLSearchParams(params ?? {}) : undefined
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok)
+    throw new Error(payload?.error?.message || `Stripe returned ${response.status}.`);
+  return payload;
+}
+async function accountHasProAccess(ctx, account) {
+  if (account.role !== "standard")
+    return true;
+  const row = (await ctx.db().select().from(stripeSubscriptions).where(eq(stripeSubscriptions.accountId, account.id)).limit(1))[0];
+  return !!row && (row.status === "active" || row.status === "trialing");
+}
+async function getOrCreateStripeCustomer(ctx, account) {
+  const db = ctx.db();
+  const existing = (await db.select().from(stripeSubscriptions).where(eq(stripeSubscriptions.accountId, account.id)).limit(1))[0];
+  if (existing?.stripeCustomerId)
+    return existing.stripeCustomerId;
+  const params = { name: account.displayName, "metadata[accountId]": String(account.id) };
+  if (account.email)
+    params.email = account.email;
+  const customer = await stripeApi("/customers", "POST", params);
+  const customerId = String(customer.id);
+  if (existing)
+    await db.update(stripeSubscriptions).set({ stripeCustomerId: customerId, updatedAt: new Date }).where(eq(stripeSubscriptions.id, existing.id));
+  else
+    await db.insert(stripeSubscriptions).values({ accountId: account.id, stripeCustomerId: customerId, status: "none" });
+  return customerId;
 }
 var prePassColumnReady = false;
 async function ensurePrePassColumn(ctx) {
@@ -644,6 +826,170 @@ function summarizeHourlyShifts(rows, hourlyRateCents) {
     days
   };
 }
+var TRUCK_NEWS_RSS_FEEDS = [
+  { url: "https://www.freightwaves.com/feed", source: "FreightWaves" },
+  { url: "https://www.truckinginfo.com/rss", source: "Heavy Duty Trucking" }
+];
+function decodeRssEntities(text) {
+  return text.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&#(\d+);/g, (_match, digits) => String.fromCharCode(Number(digits)));
+}
+function rssTagValue(block, tag) {
+  const match = block.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, "i"));
+  return match?.[1] ? decodeRssEntities(match[1]).trim() : null;
+}
+function classifyTruckNewsItem(title, summary) {
+  const text = `${title} ${summary}`.toLowerCase();
+  if (/(fmcsa|regulation|mandate|epa|emission|lawmakers|congress|speed limiter|eld|compliance)/.test(text))
+    return "regulations";
+  if (/(diesel|fuel price|gas price|def shortage|per gallon)/.test(text))
+    return "fuel";
+  if (/(spot rate|contract rate|freight rate|tender rejection|tonnage|load board)/.test(text))
+    return "rates";
+  return "industry";
+}
+async function fetchTruckNewsFromRss() {
+  const items = [];
+  const seen = new Set;
+  for (const feed of TRUCK_NEWS_RSS_FEEDS) {
+    if (items.length >= 10)
+      break;
+    let xml = "";
+    try {
+      const response = await fetch(feed.url, {
+        headers: { "User-Agent": "RigRevenue/1.0 (trucking news)" },
+        signal: AbortSignal.timeout(12000)
+      });
+      if (!response.ok)
+        continue;
+      xml = await response.text();
+    } catch {
+      continue;
+    }
+    const blocks = xml.match(/<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi) ?? [];
+    for (const block of blocks) {
+      if (items.length >= 10)
+        break;
+      const title = rssTagValue(block, "title");
+      const link = rssTagValue(block, "link");
+      if (!title || !link || seen.has(link))
+        continue;
+      let sourceUrl;
+      try {
+        const parsed = new URL(link);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+          continue;
+        sourceUrl = parsed.toString();
+      } catch {
+        continue;
+      }
+      seen.add(link);
+      const rawSummary = rssTagValue(block, "description") ?? "";
+      const summary = rawSummary.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 280) || "Read the full story at the source.";
+      const pubDate = rssTagValue(block, "pubDate");
+      const parsedDate = pubDate ? new Date(pubDate) : null;
+      items.push({
+        title,
+        summary,
+        category: classifyTruckNewsItem(title, summary),
+        source: feed.source,
+        sourceUrl,
+        publishedLabel: parsedDate && !Number.isNaN(parsedDate.getTime()) ? parsedDate.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : null
+      });
+    }
+  }
+  return items;
+}
+var USDA_REEFER_URL = "https://agtransport.usda.gov/resource/25pi-t6xr.json?$limit=5000";
+var AAA_DIESEL_URL = "https://gasprices.aaa.com/state-gas-price-averages/";
+var MARKET_REGION_LABELS = {
+  PNW: "Pacific Northwest",
+  CALIFORNIA: "California",
+  ARIZONA: "Arizona",
+  SOUTHEAST: "Southeast",
+  "MID-ATLANTIC": "Mid-Atlantic",
+  "MEXICO-TEXAS": "Mexico\u2013Texas border"
+};
+function marketNum(value) {
+  if (value == null || value === "")
+    return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+function titleCaseMarket(value) {
+  const small = new Set(["and", "of", "the", "for", "in", "on", "at", "to", "a", "an"]);
+  return value.toLowerCase().split(/(\s+|[-\/])/).map((part, index) => {
+    if (/^\s+$/.test(part) || /^[-/]$/.test(part))
+      return part;
+    if (index > 0 && small.has(part))
+      return part;
+    return part.charAt(0).toUpperCase() + part.slice(1);
+  }).join("");
+}
+function shortOrigin(origin) {
+  const cleaned = titleCaseMarket(origin.replace(/\s+/g, " ").trim());
+  if (cleaned.length <= 46)
+    return cleaned;
+  const cut = cleaned.slice(0, 44);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${cut.slice(0, lastSpace > 20 ? lastSpace : 44)}\u2026`;
+}
+function outboundHeat(avgAvail, avgRpm) {
+  if (avgAvail != null && avgAvail >= 4.5 || avgRpm != null && avgRpm >= 5)
+    return "hot";
+  if (avgAvail != null && avgAvail <= 2.5)
+    return "cold";
+  return "warm";
+}
+function inboundHeat(avgRpm, avgLoad) {
+  if (avgRpm != null && avgRpm >= 4.5 || avgLoad != null && avgLoad >= 8000)
+    return "hot";
+  if (avgRpm != null && avgRpm <= 3.2)
+    return "cold";
+  return "warm";
+}
+async function fetchUsdaReeferRows() {
+  try {
+    const response = await fetch(USDA_REEFER_URL, {
+      headers: { "User-Agent": "RigRevenue/1.0 (market zone)" },
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!response.ok)
+      return [];
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+async function fetchAaaDieselPrices() {
+  try {
+    const response = await fetch(AAA_DIESEL_URL, {
+      headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15" },
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!response.ok)
+      return [];
+    const html = await response.text();
+    const rows = html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) ?? [];
+    const prices = [];
+    for (const row of rows) {
+      const cells = [...row.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map((m) => (m[1] ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+      if (cells.length < 5)
+        continue;
+      const state = cells[0] ?? "";
+      const dieselCell = cells[4] ?? "";
+      if (!state || /^(state|regular)$/i.test(state))
+        continue;
+      const price = marketNum(dieselCell.replace(/[$,]/g, ""));
+      if (price != null && price > 0 && price < 20)
+        prices.push({ state, price: Math.round(price * 100) / 100 });
+    }
+    const seen = new Set;
+    return prices.filter((p) => seen.has(p.state) ? false : (seen.add(p.state), true));
+  } catch {
+    return [];
+  }
+}
 var Actions = {
   getAccountStatus: defineAction({
     request: z.object({ legacyClientId: clientIdSchema, sessionToken: sessionTokenSchema.optional() }),
@@ -660,7 +1006,7 @@ var Actions = {
       let account = await findAccountForToken(ctx, args.sessionToken);
       let activeToken = account && args.sessionToken ? args.sessionToken : null;
       if (!account && viewer) {
-        account = await findAccountForViewer(ctx, viewer.viewerFbid);
+        account = await findAccountForViewer(ctx, viewer);
         if (account)
           activeToken = await issueSession(ctx, account.id);
       }
@@ -676,7 +1022,7 @@ var Actions = {
       }
       return {
         authenticated: Boolean(account),
-        suggestedName: viewer?.displayName ?? null,
+        suggestedName: viewerDisplayName(viewer),
         account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, createdAt: account.createdAt.toISOString() } : null,
         legacyRole: inheritedRole,
         sessionToken: activeToken
@@ -698,7 +1044,7 @@ var Actions = {
       const existingEmail = (await db.select({ id: accounts.id }).from(accounts).where(eq(accounts.email, normalizedEmail)).limit(1))[0];
       if (existingEmail)
         throw new Error("An account already uses that email. Sign in instead.");
-      const currentAccount = viewer ? await findAccountForViewer(ctx, viewer.viewerFbid) : undefined;
+      const currentAccount = viewer ? await findAccountForViewer(ctx, viewer) : undefined;
       if (currentAccount)
         throw new Error("You are already signed in.");
       const legacy = (await db.select().from(subscriptionAccess).where(eq(subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
@@ -756,6 +1102,33 @@ var Actions = {
       return { ok: true };
     }
   }),
+  changePassword: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      currentPassword: passwordSchema,
+      newPassword: passwordSchema
+    }),
+    response: z.object({ ok: z.literal(true), sessionToken: sessionTokenSchema }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      if (account.authProvider !== "email" || !account.passwordHash || !account.passwordSalt)
+        throw new Error("Password changes are only available for email sign-in accounts.");
+      const currentHash = await derivePasswordHash(args.currentPassword, account.passwordSalt);
+      if (!safeEqualHex(account.passwordHash, currentHash))
+        throw new Error("Your current password is incorrect.");
+      const repeatedHash = await derivePasswordHash(args.newPassword, account.passwordSalt);
+      if (safeEqualHex(account.passwordHash, repeatedHash))
+        throw new Error("Choose a new password that is different from your current password.");
+      const replacementSalt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+      const replacementHash = await derivePasswordHash(args.newPassword, replacementSalt);
+      const db = ctx.db();
+      await db.update(accounts).set({ passwordHash: replacementHash, passwordSalt: replacementSalt, updatedAt: new Date }).where(eq(accounts.id, account.id));
+      await db.delete(accountSessions).where(eq(accountSessions.accountId, account.id));
+      const sessionToken = await issueSession(ctx, account.id);
+      ctx.invalidateQueries();
+      return { ok: true, sessionToken };
+    }
+  }),
   deleteMyAccount: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema }),
     response: z.object({ ok: z.literal(true) }),
@@ -779,14 +1152,15 @@ var Actions = {
       if (!viewer)
         throw new Error("Sign in to Muse before creating a RigRevenue account.");
       const db = ctx.db();
-      const existing = (await db.select().from(accounts).where(eq(accounts.viewerFbid, viewer.viewerFbid)).limit(1))[0];
+      const viewerId = viewerIdentity(viewer);
+      const existing = (await db.select().from(accounts).where(eq(accounts.viewerFbid, viewerId)).limit(1))[0];
       if (existing)
         return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, createdAt: existing.createdAt.toISOString() };
       const legacy = (await db.select().from(subscriptionAccess).where(eq(subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role = viewer.isOwner ? "creator" : legacy?.role ?? "standard";
       const accessLabel = viewer.isOwner ? "RigRevenue creator" : legacy?.label ?? null;
       const result = await db.insert(accounts).values({
-        viewerFbid: viewer.viewerFbid,
+        viewerFbid: viewerId,
         displayName: args.displayName.trim(),
         email: args.email.trim().toLowerCase(),
         authProvider: args.authProvider,
@@ -902,6 +1276,227 @@ var Actions = {
       await db.update(compInvites).set({ redeemedByClientId: args.clientId, redeemedAt: new Date }).where(eq(compInvites.id, invite.id));
       ctx.invalidateQueries();
       return { ok: true, label: invite.label };
+    }
+  }),
+  getHosState: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({
+      currentStatus: hosStatusSchema,
+      events: z.array(hosDetailedEventSchema),
+      certifications: z.array(z.object({ logDate: z.string(), signedBy: z.string(), createdAt: z.string() })),
+      motionPromptMinutes: z.number(),
+      gpsPromptsEnabled: z.boolean(),
+      serverNow: z.string()
+    }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const since = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+      const rows = await db.select().from(hosStatusEvents).where(and(eq(hosStatusEvents.accountId, account.id), gte(hosStatusEvents.startedAt, since))).orderBy(asc(hosStatusEvents.startedAt));
+      const eventIds = rows.map((row) => row.id);
+      const [settingsRows, annotations, edits, certifications] = await Promise.all([
+        db.select().from(hosSettings).where(eq(hosSettings.accountId, account.id)).limit(1),
+        eventIds.length ? db.select().from(hosEventAnnotations).where(and(eq(hosEventAnnotations.accountId, account.id), inArray(hosEventAnnotations.eventId, eventIds))).orderBy(asc(hosEventAnnotations.createdAt)) : Promise.resolve([]),
+        eventIds.length ? db.select().from(hosEventEdits).where(and(eq(hosEventEdits.accountId, account.id), inArray(hosEventEdits.eventId, eventIds))).orderBy(asc(hosEventEdits.createdAt)) : Promise.resolve([]),
+        db.select().from(hosDailyCertifications).where(eq(hosDailyCertifications.accountId, account.id)).orderBy(desc(hosDailyCertifications.logDate)).limit(10)
+      ]);
+      const settings = settingsRows[0];
+      return {
+        currentStatus: rows[rows.length - 1]?.status ?? "off_duty",
+        events: rows.map((row) => ({
+          id: row.id,
+          status: row.status,
+          startedAt: row.startedAt.toISOString(),
+          createdAt: row.createdAt.toISOString(),
+          annotations: annotations.filter((item) => item.eventId === row.id).map((item) => ({ id: item.id, body: item.body, createdAt: item.createdAt.toISOString() })),
+          edits: edits.filter((item) => item.eventId === row.id).map((item) => ({ id: item.id, originalStatus: item.originalStatus, newStatus: item.newStatus, originalStartedAt: item.originalStartedAt.toISOString(), newStartedAt: item.newStartedAt.toISOString(), reason: item.reason, editedBy: item.editedBy, createdAt: item.createdAt.toISOString() }))
+        })),
+        certifications: certifications.map((item) => ({ logDate: item.logDate, signedBy: item.signedBy, createdAt: item.createdAt.toISOString() })),
+        motionPromptMinutes: settings?.motionPromptMinutes ?? 5,
+        gpsPromptsEnabled: settings?.gpsPromptsEnabled ?? true,
+        serverNow: new Date().toISOString()
+      };
+    }
+  }),
+  changeHosStatus: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, status: hosStatusSchema }),
+    response: z.object({ ok: z.literal(true), event: hosEventSchema }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const latest = (await db.select().from(hosStatusEvents).where(eq(hosStatusEvents.accountId, account.id)).orderBy(desc(hosStatusEvents.startedAt)).limit(1))[0];
+      if (latest?.status === args.status)
+        return { ok: true, event: { id: latest.id, status: latest.status, startedAt: latest.startedAt.toISOString() } };
+      const inserted = await db.insert(hosStatusEvents).values({ accountId: account.id, status: args.status, startedAt: new Date }).returning();
+      const event = inserted[0];
+      if (!event)
+        throw new Error("Could not save that duty status.");
+      ctx.invalidateQueries();
+      return { ok: true, event: { id: event.id, status: event.status, startedAt: event.startedAt.toISOString() } };
+    }
+  }),
+  editHosEvent: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, eventId: z.number().int().positive(), status: hosStatusSchema.exclude(["driving"]), startedAt: z.string().datetime(), reason: z.string().trim().min(3).max(500) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const rows = await db.select().from(hosStatusEvents).where(eq(hosStatusEvents.accountId, account.id)).orderBy(asc(hosStatusEvents.startedAt));
+      const index = rows.findIndex((row) => row.id === args.eventId);
+      const event = index >= 0 ? rows[index] : undefined;
+      if (!event)
+        throw new Error("That duty-status event was not found.");
+      if (event.status === "driving")
+        throw new Error("Drive time is automatically recorded and cannot be edited. You may add an annotation instead. 49 CFR 395.30.");
+      const nextStartedAt = new Date(args.startedAt);
+      if (Number.isNaN(nextStartedAt.getTime()))
+        throw new Error("Enter a valid start time.");
+      const previous = index > 0 ? rows[index - 1] : undefined;
+      const next = index + 1 < rows.length ? rows[index + 1] : undefined;
+      if (previous && nextStartedAt <= previous.startedAt)
+        throw new Error("Start time must be after the prior duty-status event.");
+      if (next && nextStartedAt >= next.startedAt)
+        throw new Error("Start time must be before the next duty-status event.");
+      if (nextStartedAt.getTime() > Date.now())
+        throw new Error("A duty-status event cannot start in the future.");
+      const reason = args.reason.trim();
+      await db.batch([
+        db.insert(hosEventEdits).values({ eventId: event.id, accountId: account.id, originalStatus: event.status, newStatus: args.status, originalStartedAt: event.startedAt, newStartedAt: nextStartedAt, reason, editedBy: account.displayName }),
+        db.update(hosStatusEvents).set({ status: args.status, startedAt: nextStartedAt }).where(and(eq(hosStatusEvents.id, event.id), eq(hosStatusEvents.accountId, account.id)))
+      ]);
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
+  annotateHosEvent: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, eventId: z.number().int().positive(), body: z.string().trim().min(1).max(500) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const event = (await db.select({ id: hosStatusEvents.id }).from(hosStatusEvents).where(and(eq(hosStatusEvents.id, args.eventId), eq(hosStatusEvents.accountId, account.id))).limit(1))[0];
+      if (!event)
+        throw new Error("That duty-status event was not found.");
+      await db.insert(hosEventAnnotations).values({ eventId: event.id, accountId: account.id, body: args.body.trim() });
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
+  certifyHosLog: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, logDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), signedBy: z.string().trim().min(2).max(100) }),
+    response: z.object({ ok: z.literal(true), createdAt: z.string() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const existing = (await db.select().from(hosDailyCertifications).where(and(eq(hosDailyCertifications.accountId, account.id), eq(hosDailyCertifications.logDate, args.logDate))).limit(1))[0];
+      if (existing)
+        return { ok: true, createdAt: existing.createdAt.toISOString() };
+      const rows = await db.insert(hosDailyCertifications).values({ accountId: account.id, logDate: args.logDate, signedBy: args.signedBy.trim() }).returning();
+      const row = rows[0];
+      if (!row)
+        throw new Error("Could not certify this log.");
+      ctx.invalidateQueries();
+      return { ok: true, createdAt: row.createdAt.toISOString() };
+    }
+  }),
+  getDvirState: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ reports: z.array(dvirReportSchema), unresolvedPostTripDefects: z.array(dvirDefectSchema) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const reports = await db.select().from(dvirReports).where(eq(dvirReports.accountId, account.id)).orderBy(desc(dvirReports.createdAt)).limit(50);
+      const reportIds = reports.map((report) => report.id);
+      const defects = reportIds.length ? await db.select().from(dvirDefects).where(and(eq(dvirDefects.accountId, account.id), inArray(dvirDefects.reportId, reportIds))).orderBy(asc(dvirDefects.createdAt)) : [];
+      const postIds = new Set(reports.filter((report) => report.reportType === "post_trip").map((report) => report.id));
+      const serializeDefect = async (defect) => ({
+        id: defect.id,
+        component: dvirComponentSchema.parse(defect.component),
+        note: defect.note,
+        photoUrl: defect.photoBlobKey ? await ctx.blobs.getUrl(defect.photoBlobKey, { expiresInSeconds: 3600 }) : null,
+        repairRequired: defect.repairRequired,
+        repairedAt: defect.repairedAt?.toISOString() ?? null,
+        repairSignedBy: defect.repairSignedBy,
+        repairNote: defect.repairNote,
+        createdAt: defect.createdAt.toISOString()
+      });
+      const reportResults = await Promise.all(reports.map(async (report) => ({
+        id: report.id,
+        reportType: report.reportType,
+        odometer: report.odometerTenths / 10,
+        signedBy: report.signedBy,
+        noDefects: report.noDefects,
+        createdAt: report.createdAt.toISOString(),
+        defects: await Promise.all(defects.filter((defect) => defect.reportId === report.id).map(serializeDefect))
+      })));
+      const unresolvedPostTripDefects = await Promise.all(defects.filter((defect) => postIds.has(defect.reportId) && defect.repairRequired && !defect.repairedAt).map(serializeDefect));
+      return { reports: reportResults, unresolvedPostTripDefects };
+    }
+  }),
+  createDvirReport: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      reportType: z.enum(["pre_trip", "post_trip"]),
+      odometer: z.number().finite().min(0).max(1e7),
+      signedBy: z.string().trim().min(2).max(100),
+      noDefects: z.boolean(),
+      defects: z.array(z.object({ component: dvirComponentSchema, note: z.string().trim().max(500).optional(), photoDataBase64: z.string().max(12000000).optional(), photoMimeType: z.enum(["image/jpeg", "image/png"]).optional() })).max(11)
+    }),
+    response: z.object({ id: z.number(), createdAt: z.string() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      if (args.noDefects !== (args.defects.length === 0))
+        throw new Error("Choose All good or select each defect found.");
+      const db = ctx.db();
+      const reportRows = await db.insert(dvirReports).values({ accountId: account.id, reportType: args.reportType, odometerTenths: Math.round(args.odometer * 10), signedBy: args.signedBy.trim(), noDefects: args.noDefects }).returning();
+      const report = reportRows[0];
+      if (!report)
+        throw new Error("Could not save the inspection report.");
+      for (const defect of args.defects) {
+        let photoBlobKey = null;
+        if (defect.photoDataBase64 && defect.photoMimeType) {
+          const bytes = Buffer.from(defect.photoDataBase64, "base64");
+          if (bytes.byteLength > 8000000)
+            throw new Error("A defect photo is too large.");
+          const ext = defect.photoMimeType === "image/png" ? "png" : "jpg";
+          photoBlobKey = `dvir/${report.id}/${crypto.randomUUID()}.${ext}`;
+          await ctx.blobs.put(photoBlobKey, bytes, { contentType: defect.photoMimeType });
+        }
+        await db.insert(dvirDefects).values({ reportId: report.id, accountId: account.id, component: defect.component, note: defect.note?.trim() || null, photoBlobKey, repairRequired: args.reportType === "post_trip" });
+      }
+      ctx.invalidateQueries();
+      return { id: report.id, createdAt: report.createdAt.toISOString() };
+    }
+  }),
+  signOffDvirRepairs: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, defectIds: z.array(z.number().int().positive()).min(1).max(20), signedBy: z.string().trim().min(2).max(100), note: z.string().trim().min(2).max(500) }),
+    response: z.object({ ok: z.literal(true), repairedAt: z.string() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const defects = await db.select().from(dvirDefects).where(and(eq(dvirDefects.accountId, account.id), inArray(dvirDefects.id, args.defectIds)));
+      if (defects.length !== new Set(args.defectIds).size || defects.some((item) => !item.repairRequired || item.repairedAt))
+        throw new Error("One or more defects cannot be signed off.");
+      const repairedAt = new Date;
+      await db.update(dvirDefects).set({ repairedAt, repairSignedBy: args.signedBy.trim(), repairNote: args.note.trim() }).where(and(eq(dvirDefects.accountId, account.id), inArray(dvirDefects.id, args.defectIds)));
+      ctx.invalidateQueries();
+      return { ok: true, repairedAt: repairedAt.toISOString() };
+    }
+  }),
+  saveHosSettings: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, motionPromptMinutes: z.number().int().min(1).max(30), gpsPromptsEnabled: z.boolean() }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const existing = (await db.select({ id: hosSettings.id }).from(hosSettings).where(eq(hosSettings.accountId, account.id)).limit(1))[0];
+      const values = { accountId: account.id, motionPromptMinutes: args.motionPromptMinutes, gpsPromptsEnabled: args.gpsPromptsEnabled, updatedAt: new Date };
+      if (existing)
+        await db.update(hosSettings).set(values).where(eq(hosSettings.id, existing.id));
+      else
+        await db.insert(hosSettings).values(values);
+      ctx.invalidateQueries();
+      return { ok: true };
     }
   }),
   getPaySettings: defineAction({
@@ -1666,7 +2261,7 @@ var Actions = {
     response: roadRouteSchema,
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
-      if (account.role === "standard")
+      if (!await accountHasProAccess(ctx, account))
         throw new Error("Road for Truckers requires RigRevenue Pro.");
       await ensurePrePassColumn(ctx);
       const truck = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
@@ -1811,12 +2406,19 @@ var Actions = {
     request: z.object({}),
     response: z.object({ items: z.array(truckingNewsItemSchema), asOf: z.string() }),
     async handler(ctx) {
-      const result = await ctx.tool.web_search("latest US trucking industry news regulations diesel fuel prices freight rates owner operators September 2026");
-      const items = await ctx.inference.complete(`Select up to 10 recent, useful US trucking headlines from these search results. Cover regulations, fuel prices, freight rates, and major industry updates when available. Summaries should be factual and no more than two sentences. Use only a source URL that appears verbatim in the search results. Do not invent publication dates; use null when the search result does not clearly show one.
+      const rssItems = await fetchTruckNewsFromRss();
+      if (rssItems.length > 0)
+        return { items: rssItems, asOf: new Date().toISOString() };
+      try {
+        const result = await ctx.tool.web_search("latest US trucking industry news regulations diesel fuel prices freight rates owner operators");
+        const items = await ctx.inference.complete(`Select up to 10 recent, useful US trucking headlines from these search results. Cover regulations, fuel prices, freight rates, and major industry updates when available. Summaries should be factual and no more than two sentences. Use only a source URL that appears verbatim in the search results. Do not invent publication dates; use null when the search result does not clearly show one.
 
 Search results:
 ${JSON.stringify(result)}`, { schema: z.array(truckingNewsItemSchema).max(10) });
-      return { items, asOf: new Date().toISOString() };
+        if (items.length > 0)
+          return { items, asOf: new Date().toISOString() };
+      } catch {}
+      return { items: [], asOf: new Date().toISOString() };
     }
   }),
   scanLoadDocument: defineAction({
@@ -1881,22 +2483,33 @@ ${JSON.stringify(result)}`, { schema: z.array(truckingNewsItemSchema).max(10) })
         "https://overpass.kumi.systems/api/interpreter",
         "https://overpass.private.coffee/api/interpreter"
       ];
+      const fetchFromMirror = (endpoint, signal) => fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigRevenue/1.0" },
+        body: new URLSearchParams({ data: query }),
+        signal
+      }).then(async (response) => {
+        if (!response.ok)
+          return null;
+        const candidate = await response.json();
+        return candidate.remark ? null : candidate;
+      }).catch(() => null);
+      const controllers = endpoints.map(() => new AbortController);
+      const timeouts = controllers.map((controller) => setTimeout(() => controller.abort(), 15000));
       let payload = null;
-      for (const endpoint of endpoints) {
-        try {
-          const response = await fetch(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigRevenue/1.0" },
-            body: new URLSearchParams({ data: query })
-          });
-          if (!response.ok)
-            continue;
-          const candidate = await response.json();
-          if (!candidate.remark) {
-            payload = candidate;
-            break;
-          }
-        } catch {}
+      try {
+        const firstValid = await Promise.any(endpoints.map(async (endpoint, index) => {
+          const result = await fetchFromMirror(endpoint, controllers[index]?.signal ?? new AbortController().signal);
+          if (!result || !Array.isArray(result.elements))
+            throw new Error("mirror failed");
+          return result;
+        }));
+        payload = firstValid;
+      } catch {
+        payload = null;
+      } finally {
+        timeouts.forEach(clearTimeout);
+        controllers.forEach((controller) => controller.abort());
       }
       if (!payload)
         throw new Error("Truck services are temporarily unavailable.");
@@ -1921,6 +2534,251 @@ ${JSON.stringify(result)}`, { schema: z.array(truckingNewsItemSchema).max(10) })
       }).sort((a, b) => a.distanceMiles - b.distanceMiles).slice(0, 40);
       return { places, asOf: new Date().toISOString() };
     }
+  }),
+  getMarketZones: defineAction({
+    request: z.object({}),
+    response: z.object({
+      ok: z.boolean(),
+      weekEnding: z.string().nullable(),
+      source: z.string(),
+      outbound: z.array(z.object({
+        region: z.string(),
+        label: z.string(),
+        heat: z.enum(["hot", "warm", "cold"]),
+        avgRpm: z.number().nullable(),
+        avgLoad: z.number().nullable(),
+        availability: z.number().nullable(),
+        lanes: z.number(),
+        sampleLane: z.object({ destination: z.string(), midpoint: z.number() }).nullable()
+      })),
+      inbound: z.array(z.object({
+        city: z.string(),
+        heat: z.enum(["hot", "warm", "cold"]),
+        avgRpm: z.number().nullable(),
+        avgLoad: z.number().nullable(),
+        lanes: z.number()
+      })),
+      topLanes: z.array(z.object({
+        origin: z.string(),
+        destination: z.string(),
+        midpoint: z.number().nullable(),
+        rpm: z.number().nullable(),
+        miles: z.number().nullable(),
+        availability: z.number().nullable()
+      })),
+      error: z.string().nullable()
+    }),
+    async handler() {
+      const rows = await fetchUsdaReeferRows();
+      if (rows.length === 0) {
+        return { ok: false, weekEnding: null, source: "USDA AgTransport", outbound: [], inbound: [], topLanes: [], error: "Live market data is temporarily unavailable. Try again in a few minutes." };
+      }
+      const weekEnding = rows[0]?.date ? rows[0].date.slice(0, 10) : null;
+      const byRegion = new Map;
+      const byDest = new Map;
+      for (const row of rows) {
+        if (row.region) {
+          const list = byRegion.get(row.region) ?? [];
+          list.push(row);
+          byRegion.set(row.region, list);
+        }
+        if (row.destination) {
+          const list = byDest.get(row.destination) ?? [];
+          list.push(row);
+          byDest.set(row.destination, list);
+        }
+      }
+      const avg = (values) => {
+        const valid = values.filter((v) => v != null);
+        return valid.length ? Math.round(valid.reduce((a, b) => a + b, 0) / valid.length * 100) / 100 : null;
+      };
+      const outbound = [...byRegion.entries()].map(([region, list]) => {
+        const rpms = list.map((r) => {
+          const direct = marketNum(r.rpm);
+          if (direct != null)
+            return direct;
+          const mid = marketNum(r.midpoint);
+          const dist = marketNum(r.distance);
+          return mid != null && dist ? mid / dist : null;
+        });
+        const avgRpm = avg(rpms);
+        const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
+        const availability = avg(list.map((r) => marketNum(r.availability)));
+        const richest = [...list].sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0))[0];
+        const richestMid = richest ? marketNum(richest.midpoint) : null;
+        return {
+          region,
+          label: MARKET_REGION_LABELS[region] ?? titleCaseMarket(region),
+          heat: outboundHeat(availability, avgRpm),
+          avgRpm,
+          avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
+          availability,
+          lanes: list.length,
+          sampleLane: richest && richestMid != null ? { destination: titleCaseMarket(richest.destination ?? ""), midpoint: Math.round(richestMid) } : null
+        };
+      }).sort((a, b) => {
+        const order = { hot: 0, warm: 1, cold: 2 };
+        return order[a.heat] - order[b.heat] || (b.avgRpm ?? 0) - (a.avgRpm ?? 0);
+      });
+      const inbound = [...byDest.entries()].map(([city, list]) => {
+        const rpms = list.map((r) => {
+          const direct = marketNum(r.rpm);
+          if (direct != null)
+            return direct;
+          const mid = marketNum(r.midpoint);
+          const dist = marketNum(r.distance);
+          return mid != null && dist ? mid / dist : null;
+        });
+        const avgRpm = avg(rpms);
+        const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
+        return {
+          city: titleCaseMarket(city),
+          heat: inboundHeat(avgRpm, avgLoad),
+          avgRpm,
+          avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
+          lanes: list.length
+        };
+      }).sort((a, b) => {
+        const order = { hot: 0, warm: 1, cold: 2 };
+        return order[a.heat] - order[b.heat] || (b.avgLoad ?? 0) - (a.avgLoad ?? 0);
+      });
+      const topLanes = [...rows].sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0)).slice(0, 12).map((r) => ({
+        origin: shortOrigin(r.origin ?? ""),
+        destination: titleCaseMarket(r.destination ?? ""),
+        midpoint: marketNum(r.midpoint) != null ? Math.round(marketNum(r.midpoint)) : null,
+        rpm: (() => {
+          const direct = marketNum(r.rpm);
+          if (direct != null)
+            return Math.round(direct * 100) / 100;
+          const mid = marketNum(r.midpoint);
+          const dist = marketNum(r.distance);
+          return mid != null && dist ? Math.round(mid / dist * 100) / 100 : null;
+        })(),
+        miles: marketNum(r.distance) != null ? Math.round(marketNum(r.distance)) : null,
+        availability: marketNum(r.availability)
+      }));
+      return { ok: true, weekEnding, source: "USDA AgTransport", outbound, inbound, topLanes, error: null };
+    }
+  }),
+  getDieselPrices: defineAction({
+    request: z.object({}),
+    response: z.object({
+      ok: z.boolean(),
+      asOf: z.string().nullable(),
+      source: z.string(),
+      national: z.number().nullable(),
+      states: z.array(z.object({ state: z.string(), price: z.number() })),
+      error: z.string().nullable()
+    }),
+    async handler() {
+      const states = await fetchAaaDieselPrices();
+      if (states.length === 0) {
+        return { ok: false, asOf: null, source: "AAA", national: null, states: [], error: "Diesel prices are temporarily unavailable. Try again in a few minutes." };
+      }
+      const national = Math.round(states.reduce((sum, s) => sum + s.price, 0) / states.length * 100) / 100;
+      return { ok: true, asOf: new Date().toISOString().slice(0, 10), source: "AAA", national, states: states.sort((a, b) => a.price - b.price), error: null };
+    }
+  }),
+  getSubscriptionStatus: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({
+      hasPro: z.boolean(),
+      lifetimePro: z.boolean(),
+      plan: planSchema.nullable(),
+      status: z.string(),
+      renewsAt: z.string().nullable(),
+      cancelAtPeriodEnd: z.boolean()
+    }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const row = (await ctx.db().select().from(stripeSubscriptions).where(eq(stripeSubscriptions.accountId, account.id)).limit(1))[0];
+      return {
+        hasPro: await accountHasProAccess(ctx, account),
+        lifetimePro: account.role !== "standard",
+        plan: row?.plan ?? null,
+        status: row?.status ?? "none",
+        renewsAt: row?.currentPeriodEnd ? row.currentPeriodEnd.toISOString() : null,
+        cancelAtPeriodEnd: row?.cancelAtPeriodEnd ?? false
+      };
+    }
+  }),
+  createCheckoutSession: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, plan: planSchema }),
+    response: z.object({ url: z.string().url() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const customerId = await getOrCreateStripeCustomer(ctx, account);
+      const session = await stripeApi("/checkout/sessions", "POST", {
+        mode: "subscription",
+        customer: customerId,
+        "payment_method_types[0]": "card",
+        "payment_method_types[1]": "cashapp",
+        "line_items[0][price]": stripeTestPriceByPlan[args.plan],
+        "line_items[0][quantity]": "1",
+        client_reference_id: String(account.id),
+        "metadata[accountId]": String(account.id),
+        "subscription_data[metadata][accountId]": String(account.id),
+        success_url: "https://rigrevenue.onrender.com/?checkout=success&session_id={CHECKOUT_SESSION_ID}",
+        cancel_url: "https://rigrevenue.onrender.com/?checkout=cancelled"
+      });
+      if (!session.url)
+        throw new Error("Stripe did not return a checkout URL.");
+      return { url: session.url };
+    }
+  }),
+  verifyCheckoutSession: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, sessionId: z.string().min(1).max(200) }),
+    response: z.object({ hasPro: z.boolean(), plan: planSchema.nullable(), renewsAt: z.string().nullable() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const session = await stripeApi(`/checkout/sessions/${encodeURIComponent(args.sessionId)}`, "GET");
+      const sessionAccountId = Number(session?.metadata?.accountId ?? session?.client_reference_id) || null;
+      if (sessionAccountId !== account.id)
+        throw new Error("This checkout session belongs to a different account.");
+      let plan = null;
+      let renewsAt = null;
+      const subscriptionId = typeof session.subscription === "string" ? session.subscription : null;
+      if (session.payment_status === "paid" && subscriptionId) {
+        const subscription = await stripeApi(`/subscriptions/${subscriptionId}`, "GET");
+        const priceId = subscription?.items?.data?.[0]?.price?.id;
+        plan = typeof priceId === "string" && stripeTestPlanByPrice[priceId] || null;
+        const periodEnd = typeof subscription.current_period_end === "number" ? new Date(subscription.current_period_end * 1000) : null;
+        renewsAt = periodEnd ? periodEnd.toISOString() : null;
+        const values = {
+          stripeCustomerId: String(subscription.customer),
+          stripeSubscriptionId: subscriptionId,
+          plan,
+          status: String(subscription.status || "unknown"),
+          currentPeriodEnd: periodEnd,
+          cancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end),
+          updatedAt: new Date
+        };
+        const existing = (await db.select().from(stripeSubscriptions).where(eq(stripeSubscriptions.accountId, account.id)).limit(1))[0];
+        if (existing)
+          await db.update(stripeSubscriptions).set(values).where(eq(stripeSubscriptions.id, existing.id));
+        else
+          await db.insert(stripeSubscriptions).values({ accountId: account.id, ...values });
+      }
+      return { hasPro: await accountHasProAccess(ctx, account), plan, renewsAt };
+    }
+  }),
+  createBillingPortalSession: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ url: z.string().url() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const row = (await ctx.db().select().from(stripeSubscriptions).where(eq(stripeSubscriptions.accountId, account.id)).limit(1))[0];
+      if (!row?.stripeCustomerId)
+        throw new Error("No billing account found yet.");
+      const portal = await stripeApi("/billing_portal/sessions", "POST", {
+        customer: row.stripeCustomerId,
+        return_url: "https://rigrevenue.onrender.com/"
+      });
+      if (!portal.url)
+        throw new Error("Stripe did not return a billing portal URL.");
+      return { url: portal.url };
+    }
   })
 };
 
@@ -1929,13 +2787,20 @@ var databaseUrl = requiredEnv("DATABASE_URL");
 var sessionPepper = requiredEnv("SESSION_PEPPER");
 var openAiApiKey = process.env.OPENAI_API_KEY?.trim() || null;
 var openAiModel = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+var stripeSecretKey2 = process.env.STRIPE_SECRET_KEY?.trim() || null;
+var stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim() || null;
+var stripeTestPlans = {
+  price_1UKtygLTe9osv09oYHxPoJys: "weekly",
+  price_1UKtyhLTe9osv09owS82qxkq: "monthly",
+  price_1UKtyiLTe9osv09oFHCbM89H: "yearly"
+};
 var port = Number(process.env.PORT || 3000);
 var maxUploadBytes = Number(process.env.MAX_UPLOAD_BYTES || 18000000);
 var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("localhost") ? false : { rejectUnauthorized: false } });
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql"];
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql"];
 var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
@@ -2093,6 +2958,116 @@ async function serveStatic(pathname) {
   const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
   return new Response(file, { headers: { "Content-Type": mime[extname(file.name || safePath)] || "application/octet-stream", "Cache-Control": requested === "index.html" ? "no-cache" : "public, max-age=31536000, immutable", "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob: https://tile.openstreetmap.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self'; connect-src 'self' https://api.openai.com https://nominatim.openstreetmap.org https://router.project-osrm.org https://valhalla1.openstreetmap.de https://overpass-api.de https://overpass.kumi.systems https://overpass.private.coffee; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self'" } });
 }
+async function verifyStripeSignature(payload, header, secret) {
+  const fields = new Map;
+  for (const part of header.split(",")) {
+    const index = part.indexOf("=");
+    if (index < 0)
+      continue;
+    const key = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    if (!fields.has(key))
+      fields.set(key, []);
+    fields.get(key).push(value);
+  }
+  const timestamps = fields.get("t") ?? [];
+  const signatures = fields.get("v1") ?? [];
+  if (timestamps.length === 0 || signatures.length === 0)
+    return false;
+  const sentAt = Number(timestamps[0]);
+  if (!Number.isFinite(sentAt) || Math.abs(Date.now() / 1000 - sentAt) > 300)
+    return false;
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamps[0]}.${payload}`));
+  const expected = Buffer.from(digest).toString("hex");
+  const expectedBytes = Buffer.from(expected, "utf8");
+  return signatures.some((candidate) => {
+    const candidateBytes = Buffer.from(candidate, "utf8");
+    return candidateBytes.length === expectedBytes.length && timingSafeEqual(candidateBytes, expectedBytes);
+  });
+}
+async function stripeApiGet(path) {
+  if (!stripeSecretKey2)
+    throw new Error("Stripe is not configured.");
+  const response = await fetch(`https://api.stripe.com/v1${path}`, {
+    headers: { Authorization: `Basic ${Buffer.from(`${stripeSecretKey2}:`).toString("base64")}` }
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok)
+    throw new Error(payload?.error?.message || `Stripe returned ${response.status}.`);
+  return payload;
+}
+function planFromStripeSubscription(subscription) {
+  const priceId = subscription?.items?.data?.[0]?.price?.id;
+  return typeof priceId === "string" && stripeTestPlans[priceId] || null;
+}
+async function upsertStripeSubscription(subscription, accountId) {
+  const subscriptionId = String(subscription.id);
+  const periodEnd = typeof subscription.current_period_end === "number" ? new Date(subscription.current_period_end * 1000) : null;
+  const values = {
+    stripeCustomerId: String(subscription.customer),
+    stripeSubscriptionId: subscriptionId,
+    plan: planFromStripeSubscription(subscription),
+    status: String(subscription.status || "unknown"),
+    currentPeriodEnd: periodEnd,
+    cancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end),
+    updatedAt: new Date
+  };
+  const existing = (await drizzleDb.select().from(stripeSubscriptions).where(eq2(stripeSubscriptions.stripeSubscriptionId, subscriptionId)).limit(1))[0];
+  if (existing) {
+    await drizzleDb.update(stripeSubscriptions).set(values).where(eq2(stripeSubscriptions.id, existing.id));
+    return;
+  }
+  const resolvedAccountId = accountId ?? Number(subscription?.metadata?.accountId) ?? null;
+  if (resolvedAccountId && Number.isFinite(resolvedAccountId)) {
+    const byAccount = (await drizzleDb.select().from(stripeSubscriptions).where(eq2(stripeSubscriptions.accountId, resolvedAccountId)).limit(1))[0];
+    if (byAccount) {
+      await drizzleDb.update(stripeSubscriptions).set(values).where(eq2(stripeSubscriptions.id, byAccount.id));
+      return;
+    }
+    await drizzleDb.insert(stripeSubscriptions).values({ accountId: resolvedAccountId, ...values });
+    return;
+  }
+  console.error(JSON.stringify({ stripeWebhook: "no account match", subscriptionId }));
+}
+async function handleStripeWebhook(request) {
+  if (!stripeWebhookSecret) {
+    console.error(JSON.stringify({ stripeWebhook: "STRIPE_WEBHOOK_SECRET is not configured" }));
+    return json({ error: "Webhook not configured." }, 503);
+  }
+  const signature = request.headers.get("stripe-signature") || "";
+  const payload = await request.text();
+  if (!await verifyStripeSignature(payload, signature, stripeWebhookSecret)) {
+    return json({ error: "Invalid signature." }, 400);
+  }
+  let event;
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    return json({ error: "Invalid JSON." }, 400);
+  }
+  try {
+    const type = String(event?.type || "");
+    if (type === "checkout.session.completed") {
+      const session = event.data?.object ?? {};
+      const subscriptionId = typeof session.subscription === "string" ? session.subscription : null;
+      const accountId = Number(session?.metadata?.accountId ?? session?.client_reference_id) || null;
+      if (session.mode === "subscription" && subscriptionId) {
+        await upsertStripeSubscription(await stripeApiGet(`/v1/subscriptions/${subscriptionId}`), accountId);
+      }
+    } else if (type === "customer.subscription.updated" || type === "customer.subscription.deleted") {
+      await upsertStripeSubscription(event.data?.object ?? {}, null);
+    } else if (type === "invoice.payment_failed") {
+      const subscriptionId = typeof event.data?.object?.subscription === "string" ? event.data.object.subscription : null;
+      if (subscriptionId)
+        await upsertStripeSubscription(await stripeApiGet(`/v1/subscriptions/${subscriptionId}`), null);
+    }
+  } catch (error) {
+    console.error(JSON.stringify({ stripeWebhook: error instanceof Error ? error.message : "handler failed" }));
+    return json({ error: "Webhook handler failed." }, 500);
+  }
+  return json({ received: true });
+}
 await migrate();
 var server = Bun.serve({
   port,
@@ -2106,8 +3081,14 @@ var server = Bun.serve({
         return json({ ok: false }, 503);
       }
     }
+    const legacyHost = request.headers.get("host")?.split(":")[0]?.toLowerCase();
+    if (legacyHost === "rigbooks.onrender.com") {
+      return Response.redirect(`https://rigrevenue.onrender.com${url.pathname}${url.search}`, 301);
+    }
     if (url.pathname.startsWith("/files/") && request.method === "GET")
       return serveBlob(url);
+    if (url.pathname === "/api/stripe/webhook" && request.method === "POST")
+      return handleStripeWebhook(request);
     if (url.pathname === "/actions" && request.method === "POST") {
       const declaredLength = Number(request.headers.get("content-length") || 0);
       if (declaredLength > maxUploadBytes)
