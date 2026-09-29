@@ -68,6 +68,59 @@ export const hosSettings = pgTable("hos_settings", {
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
 }, (table) => [uniqueIndex("hos_settings_account_id_unique").on(table.accountId)]);
 
+export const hosEventAnnotations = pgTable("hos_event_annotations", {
+  id: serial("id").primaryKey(),
+  eventId: integer("event_id").notNull().references(() => hosStatusEvents.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  body: text("body").notNull(),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [index("hos_event_annotations_event_idx").on(table.eventId, table.createdAt)]);
+
+export const hosEventEdits = pgTable("hos_event_edits", {
+  id: serial("id").primaryKey(),
+  eventId: integer("event_id").notNull().references(() => hosStatusEvents.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  originalStatus: text("original_status", { enum: ["off_duty", "sleeper", "driving", "on_duty"] }).notNull(),
+  newStatus: text("new_status", { enum: ["off_duty", "sleeper", "driving", "on_duty"] }).notNull(),
+  originalStartedAt: timestamp("original_started_at", { mode: "date", withTimezone: true }).notNull(),
+  newStartedAt: timestamp("new_started_at", { mode: "date", withTimezone: true }).notNull(),
+  reason: text("reason").notNull(),
+  editedBy: text("edited_by").notNull(),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [index("hos_event_edits_event_idx").on(table.eventId, table.createdAt)]);
+
+export const hosDailyCertifications = pgTable("hos_daily_certifications", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  logDate: text("log_date").notNull(),
+  signedBy: text("signed_by").notNull(),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [uniqueIndex("hos_daily_certifications_account_date_unique").on(table.accountId, table.logDate)]);
+
+export const dvirReports = pgTable("dvir_reports", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  reportType: text("report_type", { enum: ["pre_trip", "post_trip"] }).notNull(),
+  odometerTenths: integer("odometer_tenths").notNull(),
+  signedBy: text("signed_by").notNull(),
+  noDefects: boolean("no_defects").notNull().default(false),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [index("dvir_reports_account_created_idx").on(table.accountId, table.createdAt)]);
+
+export const dvirDefects = pgTable("dvir_defects", {
+  id: serial("id").primaryKey(),
+  reportId: integer("report_id").notNull().references(() => dvirReports.id, { onDelete: "cascade" }),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  component: text("component").notNull(),
+  note: text("note"),
+  photoBlobKey: text("photo_blob_key"),
+  repairRequired: boolean("repair_required").notNull().default(false),
+  repairedAt: timestamp("repaired_at", { mode: "date", withTimezone: true }),
+  repairSignedBy: text("repair_signed_by"),
+  repairNote: text("repair_note"),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [index("dvir_defects_account_repair_idx").on(table.accountId, table.repairedAt)]);
+
 export const truckProfiles = pgTable("truck_profiles", {
   id: serial("id").primaryKey(),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),

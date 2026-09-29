@@ -1,4 +1,4 @@
-import { defineAction, z, type ActionsModule, type Ctx } from "./runtime";
+import { defineAction, z, type ActionsModule, type Ctx, type Viewer } from "./runtime";
 import { and, asc, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
@@ -12,6 +12,19 @@ const emailSchema = z.string().trim().email().max(160);
 const passwordSchema = z.string().min(10).max(128);
 const hosStatusSchema = z.enum(["off_duty", "sleeper", "driving", "on_duty"]);
 const hosEventSchema = z.object({ id: z.number(), status: hosStatusSchema, startedAt: z.string() });
+const hosDetailedEventSchema = hosEventSchema.extend({
+  createdAt: z.string(),
+  annotations: z.array(z.object({ id: z.number(), body: z.string(), createdAt: z.string() })),
+  edits: z.array(z.object({ id: z.number(), originalStatus: hosStatusSchema, newStatus: hosStatusSchema, originalStartedAt: z.string(), newStartedAt: z.string(), reason: z.string(), editedBy: z.string(), createdAt: z.string() })),
+});
+const dvirComponentSchema = z.enum(["service_brakes", "parking_brake", "steering_mechanism", "lighting_reflectors", "tires", "horn", "windshield_wipers", "rear_vision_mirrors", "coupling_devices", "wheels_rims", "emergency_equipment"]);
+const dvirDefectSchema = z.object({
+  id: z.number(), component: dvirComponentSchema, note: z.string().nullable(), photoUrl: z.string().nullable(),
+  repairRequired: z.boolean(), repairedAt: z.string().nullable(), repairSignedBy: z.string().nullable(), repairNote: z.string().nullable(), createdAt: z.string(),
+});
+const dvirReportSchema = z.object({
+  id: z.number(), reportType: z.enum(["pre_trip", "post_trip"]), odometer: z.number(), signedBy: z.string(), noDefects: z.boolean(), createdAt: z.string(), defects: z.array(dvirDefectSchema),
+});
 const sessionTokenSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const samScopeSchema = z.enum([
   "app_help",
@@ -163,8 +176,16 @@ const roadRouteSchema = z.object({
   attribution: z.string(),
 });
 
-async function findAccountForViewer(ctx: Ctx, viewerFbid: string): Promise<typeof schema.accounts.$inferSelect | undefined> {
-  return (await ctx.db<typeof schema>().select().from(schema.accounts).where(eq(schema.accounts.viewerFbid, viewerFbid)).limit(1))[0];
+function viewerIdentity(viewer: Viewer): string {
+  return viewer.source === "local" ? `local:${viewer.userId}` : viewer.viewerFbid;
+}
+
+function viewerDisplayName(viewer: Viewer | undefined): string | null {
+  return viewer?.source === "cloudflare" ? (viewer.displayName ?? null) : null;
+}
+
+async function findAccountForViewer(ctx: Ctx, viewer: Viewer): Promise<typeof schema.accounts.$inferSelect | undefined> {
+  return (await ctx.db<typeof schema>().select().from(schema.accounts).where(eq(schema.accounts.viewerFbid, viewerIdentity(viewer))).limit(1))[0];
 }
 
 async function hashSessionToken(token: string): Promise<string> {
@@ -435,7 +456,7 @@ function decodeRssEntities(text: string): string {
 
 function rssTagValue(block: string, tag: string): string | null {
   const match = block.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, "i"));
-  return match ? decodeRssEntities(match[1]).trim() : null;
+  return match?.[1] ? decodeRssEntities(match[1]).trim() : null;
 }
 
 function classifyTruckNewsItem(title: string, summary: string): z.infer<typeof truckingNewsItemSchema>["category"] {
@@ -609,7 +630,7 @@ export const Actions = {
       let account = await findAccountForToken(ctx, args.sessionToken);
       let activeToken = account && args.sessionToken ? args.sessionToken : null;
       if (!account && viewer) {
-        account = await findAccountForViewer(ctx, viewer.viewerFbid);
+        account = await findAccountForViewer(ctx, viewer);
         if (account) activeToken = await issueSession(ctx, account.id);
       }
       const legacy = (await db.select().from(schema.subscriptionAccess).where(eq(schema.subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
@@ -623,7 +644,7 @@ export const Actions = {
       }
       return {
         authenticated: Boolean(account),
-        suggestedName: viewer?.displayName ?? null,
+        suggestedName: viewerDisplayName(viewer),
         account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, createdAt: account.createdAt.toISOString() } : null,
         legacyRole: inheritedRole,
         sessionToken: activeToken,
@@ -645,7 +666,7 @@ export const Actions = {
       const normalizedEmail = args.email.trim().toLowerCase();
       const existingEmail = (await db.select({ id: schema.accounts.id }).from(schema.accounts).where(eq(schema.accounts.email, normalizedEmail)).limit(1))[0];
       if (existingEmail) throw new Error("An account already uses that email. Sign in instead.");
-      const currentAccount = viewer ? await findAccountForViewer(ctx, viewer.viewerFbid) : undefined;
+      const currentAccount = viewer ? await findAccountForViewer(ctx, viewer) : undefined;
       if (currentAccount) throw new Error("You are already signed in.");
       const legacy = (await db.select().from(schema.subscriptionAccess).where(eq(schema.subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role: z.infer<typeof accessRoleSchema> = viewer?.isOwner ? "creator" : (legacy?.role ?? "standard");
@@ -749,13 +770,14 @@ export const Actions = {
       const viewer = ctx.viewer;
       if (!viewer) throw new Error("Sign in to Muse before creating a RigRevenue account.");
       const db = ctx.db<typeof schema>();
-      const existing = (await db.select().from(schema.accounts).where(eq(schema.accounts.viewerFbid, viewer.viewerFbid)).limit(1))[0];
+      const viewerId = viewerIdentity(viewer);
+      const existing = (await db.select().from(schema.accounts).where(eq(schema.accounts.viewerFbid, viewerId)).limit(1))[0];
       if (existing) return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, createdAt: existing.createdAt.toISOString() };
       const legacy = (await db.select().from(schema.subscriptionAccess).where(eq(schema.subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role: z.infer<typeof accessRoleSchema> = viewer.isOwner ? "creator" : (legacy?.role ?? "standard");
       const accessLabel = viewer.isOwner ? "RigRevenue creator" : (legacy?.label ?? null);
       const result = await db.insert(schema.accounts).values({
-        viewerFbid: viewer.viewerFbid,
+        viewerFbid: viewerId,
         displayName: args.displayName.trim(),
         email: args.email.trim().toLowerCase(),
         authProvider: args.authProvider,
@@ -875,7 +897,8 @@ export const Actions = {
     request: z.object({ sessionToken: sessionTokenSchema }),
     response: z.object({
       currentStatus: hosStatusSchema,
-      events: z.array(hosEventSchema),
+      events: z.array(hosDetailedEventSchema),
+      certifications: z.array(z.object({ logDate: z.string(), signedBy: z.string(), createdAt: z.string() })),
       motionPromptMinutes: z.number(),
       gpsPromptsEnabled: z.boolean(),
       serverNow: z.string(),
@@ -885,10 +908,22 @@ export const Actions = {
       const db = ctx.db<typeof schema>();
       const since = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
       const rows = await db.select().from(schema.hosStatusEvents).where(and(eq(schema.hosStatusEvents.accountId, account.id), gte(schema.hosStatusEvents.startedAt, since))).orderBy(asc(schema.hosStatusEvents.startedAt));
-      const settings = (await db.select().from(schema.hosSettings).where(eq(schema.hosSettings.accountId, account.id)).limit(1))[0];
+      const eventIds = rows.map((row) => row.id);
+      const [settingsRows, annotations, edits, certifications] = await Promise.all([
+        db.select().from(schema.hosSettings).where(eq(schema.hosSettings.accountId, account.id)).limit(1),
+        eventIds.length ? db.select().from(schema.hosEventAnnotations).where(and(eq(schema.hosEventAnnotations.accountId, account.id), inArray(schema.hosEventAnnotations.eventId, eventIds))).orderBy(asc(schema.hosEventAnnotations.createdAt)) : Promise.resolve([]),
+        eventIds.length ? db.select().from(schema.hosEventEdits).where(and(eq(schema.hosEventEdits.accountId, account.id), inArray(schema.hosEventEdits.eventId, eventIds))).orderBy(asc(schema.hosEventEdits.createdAt)) : Promise.resolve([]),
+        db.select().from(schema.hosDailyCertifications).where(eq(schema.hosDailyCertifications.accountId, account.id)).orderBy(desc(schema.hosDailyCertifications.logDate)).limit(10),
+      ]);
+      const settings = settingsRows[0];
       return {
         currentStatus: rows[rows.length - 1]?.status ?? "off_duty",
-        events: rows.map((row) => ({ id: row.id, status: row.status, startedAt: row.startedAt.toISOString() })),
+        events: rows.map((row) => ({
+          id: row.id, status: row.status, startedAt: row.startedAt.toISOString(), createdAt: row.createdAt.toISOString(),
+          annotations: annotations.filter((item) => item.eventId === row.id).map((item) => ({ id: item.id, body: item.body, createdAt: item.createdAt.toISOString() })),
+          edits: edits.filter((item) => item.eventId === row.id).map((item) => ({ id: item.id, originalStatus: item.originalStatus, newStatus: item.newStatus, originalStartedAt: item.originalStartedAt.toISOString(), newStartedAt: item.newStartedAt.toISOString(), reason: item.reason, editedBy: item.editedBy, createdAt: item.createdAt.toISOString() })),
+        })),
+        certifications: certifications.map((item) => ({ logDate: item.logDate, signedBy: item.signedBy, createdAt: item.createdAt.toISOString() })),
         motionPromptMinutes: settings?.motionPromptMinutes ?? 5,
         gpsPromptsEnabled: settings?.gpsPromptsEnabled ?? true,
         serverNow: new Date().toISOString(),
@@ -909,6 +944,133 @@ export const Actions = {
       if (!event) throw new Error("Could not save that duty status.");
       ctx.invalidateQueries();
       return { ok: true, event: { id: event.id, status: event.status, startedAt: event.startedAt.toISOString() } };
+    },
+  }),
+
+  editHosEvent: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, eventId: z.number().int().positive(), status: hosStatusSchema.exclude(["driving"]), startedAt: z.string().datetime(), reason: z.string().trim().min(3).max(500) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const rows = await db.select().from(schema.hosStatusEvents).where(eq(schema.hosStatusEvents.accountId, account.id)).orderBy(asc(schema.hosStatusEvents.startedAt));
+      const index = rows.findIndex((row) => row.id === args.eventId);
+      const event = index >= 0 ? rows[index] : undefined;
+      if (!event) throw new Error("That duty-status event was not found.");
+      if (event.status === "driving") throw new Error("Drive time is automatically recorded and cannot be edited. You may add an annotation instead. 49 CFR 395.30.");
+      const nextStartedAt = new Date(args.startedAt);
+      if (Number.isNaN(nextStartedAt.getTime())) throw new Error("Enter a valid start time.");
+      const previous = index > 0 ? rows[index - 1] : undefined;
+      const next = index + 1 < rows.length ? rows[index + 1] : undefined;
+      if (previous && nextStartedAt <= previous.startedAt) throw new Error("Start time must be after the prior duty-status event.");
+      if (next && nextStartedAt >= next.startedAt) throw new Error("Start time must be before the next duty-status event.");
+      if (nextStartedAt.getTime() > Date.now()) throw new Error("A duty-status event cannot start in the future.");
+      const reason = args.reason.trim();
+      await db.batch([
+        db.insert(schema.hosEventEdits).values({ eventId: event.id, accountId: account.id, originalStatus: event.status, newStatus: args.status, originalStartedAt: event.startedAt, newStartedAt: nextStartedAt, reason, editedBy: account.displayName }),
+        db.update(schema.hosStatusEvents).set({ status: args.status, startedAt: nextStartedAt }).where(and(eq(schema.hosStatusEvents.id, event.id), eq(schema.hosStatusEvents.accountId, account.id))),
+      ]);
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  annotateHosEvent: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, eventId: z.number().int().positive(), body: z.string().trim().min(1).max(500) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const event = (await db.select({ id: schema.hosStatusEvents.id }).from(schema.hosStatusEvents).where(and(eq(schema.hosStatusEvents.id, args.eventId), eq(schema.hosStatusEvents.accountId, account.id))).limit(1))[0];
+      if (!event) throw new Error("That duty-status event was not found.");
+      await db.insert(schema.hosEventAnnotations).values({ eventId: event.id, accountId: account.id, body: args.body.trim() });
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  certifyHosLog: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, logDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), signedBy: z.string().trim().min(2).max(100) }),
+    response: z.object({ ok: z.literal(true), createdAt: z.string() }),
+    async handler(ctx, args): Promise<{ ok: true; createdAt: string }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const existing = (await db.select().from(schema.hosDailyCertifications).where(and(eq(schema.hosDailyCertifications.accountId, account.id), eq(schema.hosDailyCertifications.logDate, args.logDate))).limit(1))[0];
+      if (existing) return { ok: true, createdAt: existing.createdAt.toISOString() };
+      const rows = await db.insert(schema.hosDailyCertifications).values({ accountId: account.id, logDate: args.logDate, signedBy: args.signedBy.trim() }).returning();
+      const row = rows[0];
+      if (!row) throw new Error("Could not certify this log.");
+      ctx.invalidateQueries();
+      return { ok: true, createdAt: row.createdAt.toISOString() };
+    },
+  }),
+
+  getDvirState: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ reports: z.array(dvirReportSchema), unresolvedPostTripDefects: z.array(dvirDefectSchema) }),
+    async handler(ctx, args): Promise<{ reports: Array<z.infer<typeof dvirReportSchema>>; unresolvedPostTripDefects: Array<z.infer<typeof dvirDefectSchema>> }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const reports = await db.select().from(schema.dvirReports).where(eq(schema.dvirReports.accountId, account.id)).orderBy(desc(schema.dvirReports.createdAt)).limit(50);
+      const reportIds = reports.map((report) => report.id);
+      const defects = reportIds.length ? await db.select().from(schema.dvirDefects).where(and(eq(schema.dvirDefects.accountId, account.id), inArray(schema.dvirDefects.reportId, reportIds))).orderBy(asc(schema.dvirDefects.createdAt)) : [];
+      const postIds = new Set(reports.filter((report) => report.reportType === "post_trip").map((report) => report.id));
+      const serializeDefect = async (defect: typeof schema.dvirDefects.$inferSelect): Promise<z.infer<typeof dvirDefectSchema>> => ({
+        id: defect.id, component: dvirComponentSchema.parse(defect.component), note: defect.note,
+        photoUrl: defect.photoBlobKey ? await ctx.blobs.getUrl(defect.photoBlobKey, { expiresInSeconds: 3600 }) : null,
+        repairRequired: defect.repairRequired, repairedAt: defect.repairedAt?.toISOString() ?? null,
+        repairSignedBy: defect.repairSignedBy, repairNote: defect.repairNote, createdAt: defect.createdAt.toISOString(),
+      });
+      const reportResults = await Promise.all(reports.map(async (report) => ({
+        id: report.id, reportType: report.reportType, odometer: report.odometerTenths / 10, signedBy: report.signedBy, noDefects: report.noDefects, createdAt: report.createdAt.toISOString(),
+        defects: await Promise.all(defects.filter((defect) => defect.reportId === report.id).map(serializeDefect)),
+      })));
+      const unresolvedPostTripDefects = await Promise.all(defects.filter((defect) => postIds.has(defect.reportId) && defect.repairRequired && !defect.repairedAt).map(serializeDefect));
+      return { reports: reportResults, unresolvedPostTripDefects };
+    },
+  }),
+
+  createDvirReport: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema, reportType: z.enum(["pre_trip", "post_trip"]), odometer: z.number().finite().min(0).max(10000000), signedBy: z.string().trim().min(2).max(100), noDefects: z.boolean(),
+      defects: z.array(z.object({ component: dvirComponentSchema, note: z.string().trim().max(500).optional(), photoDataBase64: z.string().max(12_000_000).optional(), photoMimeType: z.enum(["image/jpeg", "image/png"]).optional() })).max(11),
+    }),
+    response: z.object({ id: z.number(), createdAt: z.string() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      if (args.noDefects !== (args.defects.length === 0)) throw new Error("Choose All good or select each defect found.");
+      const db = ctx.db<typeof schema>();
+      const reportRows = await db.insert(schema.dvirReports).values({ accountId: account.id, reportType: args.reportType, odometerTenths: Math.round(args.odometer * 10), signedBy: args.signedBy.trim(), noDefects: args.noDefects }).returning();
+      const report = reportRows[0];
+      if (!report) throw new Error("Could not save the inspection report.");
+      for (const defect of args.defects) {
+        let photoBlobKey: string | null = null;
+        if (defect.photoDataBase64 && defect.photoMimeType) {
+          const bytes = Buffer.from(defect.photoDataBase64, "base64");
+          if (bytes.byteLength > 8_000_000) throw new Error("A defect photo is too large.");
+          const ext = defect.photoMimeType === "image/png" ? "png" : "jpg";
+          photoBlobKey = `dvir/${report.id}/${crypto.randomUUID()}.${ext}`;
+          await ctx.blobs.put(photoBlobKey, bytes, { contentType: defect.photoMimeType });
+        }
+        await db.insert(schema.dvirDefects).values({ reportId: report.id, accountId: account.id, component: defect.component, note: defect.note?.trim() || null, photoBlobKey, repairRequired: args.reportType === "post_trip" });
+      }
+      ctx.invalidateQueries();
+      return { id: report.id, createdAt: report.createdAt.toISOString() };
+    },
+  }),
+
+  signOffDvirRepairs: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, defectIds: z.array(z.number().int().positive()).min(1).max(20), signedBy: z.string().trim().min(2).max(100), note: z.string().trim().min(2).max(500) }),
+    response: z.object({ ok: z.literal(true), repairedAt: z.string() }),
+    async handler(ctx, args): Promise<{ ok: true; repairedAt: string }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const defects = await db.select().from(schema.dvirDefects).where(and(eq(schema.dvirDefects.accountId, account.id), inArray(schema.dvirDefects.id, args.defectIds)));
+      if (defects.length !== new Set(args.defectIds).size || defects.some((item) => !item.repairRequired || item.repairedAt)) throw new Error("One or more defects cannot be signed off.");
+      const repairedAt = new Date();
+      await db.update(schema.dvirDefects).set({ repairedAt, repairSignedBy: args.signedBy.trim(), repairNote: args.note.trim() }).where(and(eq(schema.dvirDefects.accountId, account.id), inArray(schema.dvirDefects.id, args.defectIds)));
+      ctx.invalidateQueries();
+      return { ok: true, repairedAt: repairedAt.toISOString() };
     },
   }),
 
