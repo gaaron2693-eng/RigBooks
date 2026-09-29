@@ -417,6 +417,182 @@ function summarizeHourlyShifts(
   };
 }
 
+const TRUCK_NEWS_RSS_FEEDS = [
+  { url: "https://www.freightwaves.com/feed", source: "FreightWaves" },
+  { url: "https://www.truckinginfo.com/rss", source: "Heavy Duty Trucking" },
+];
+
+function decodeRssEntities(text: string): string {
+  return text
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_match, digits) => String.fromCharCode(Number(digits)));
+}
+
+function rssTagValue(block: string, tag: string): string | null {
+  const match = block.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, "i"));
+  return match ? decodeRssEntities(match[1]).trim() : null;
+}
+
+function classifyTruckNewsItem(title: string, summary: string): z.infer<typeof truckingNewsItemSchema>["category"] {
+  const text = `${title} ${summary}`.toLowerCase();
+  if (/(fmcsa|regulation|mandate|epa|emission|lawmakers|congress|speed limiter|eld|compliance)/.test(text)) return "regulations";
+  if (/(diesel|fuel price|gas price|def shortage|per gallon)/.test(text)) return "fuel";
+  if (/(spot rate|contract rate|freight rate|tender rejection|tonnage|load board)/.test(text)) return "rates";
+  return "industry";
+}
+
+async function fetchTruckNewsFromRss(): Promise<z.infer<typeof truckingNewsItemSchema>[]> {
+  const items: z.infer<typeof truckingNewsItemSchema>[] = [];
+  const seen = new Set<string>();
+  for (const feed of TRUCK_NEWS_RSS_FEEDS) {
+    if (items.length >= 10) break;
+    let xml = "";
+    try {
+      const response = await fetch(feed.url, {
+        headers: { "User-Agent": "RigRevenue/1.0 (trucking news)" },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!response.ok) continue;
+      xml = await response.text();
+    } catch {
+      continue;
+    }
+    const blocks = xml.match(/<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi) ?? [];
+    for (const block of blocks) {
+      if (items.length >= 10) break;
+      const title = rssTagValue(block, "title");
+      const link = rssTagValue(block, "link");
+      if (!title || !link || seen.has(link)) continue;
+      let sourceUrl: string;
+      try {
+        const parsed = new URL(link);
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") continue;
+        sourceUrl = parsed.toString();
+      } catch {
+        continue;
+      }
+      seen.add(link);
+      const rawSummary = rssTagValue(block, "description") ?? "";
+      const summary = rawSummary.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 280)
+        || "Read the full story at the source.";
+      const pubDate = rssTagValue(block, "pubDate");
+      const parsedDate = pubDate ? new Date(pubDate) : null;
+      items.push({
+        title,
+        summary,
+        category: classifyTruckNewsItem(title, summary),
+        source: feed.source,
+        sourceUrl,
+        publishedLabel: parsedDate && !Number.isNaN(parsedDate.getTime())
+          ? parsedDate.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+          : null,
+      });
+    }
+  }
+  return items;
+}
+
+// ---- Market Zone: live USDA reefer rates + AAA diesel prices (no API keys) ----
+const USDA_REEFER_URL = "https://agtransport.usda.gov/resource/25pi-t6xr.json?$limit=5000";
+const AAA_DIESEL_URL = "https://gasprices.aaa.com/state-gas-price-averages/";
+
+type UsdaReeferRow = {
+  date?: string; region?: string; origin?: string; destination?: string;
+  distance?: string; commodity?: string; weeklow?: string; weekhigh?: string;
+  midpoint?: string; rpm?: string; availability?: string;
+};
+
+const MARKET_REGION_LABELS: Record<string, string> = {
+  "PNW": "Pacific Northwest",
+  "CALIFORNIA": "California",
+  "ARIZONA": "Arizona",
+  "SOUTHEAST": "Southeast",
+  "MID-ATLANTIC": "Mid-Atlantic",
+  "MEXICO-TEXAS": "Mexico–Texas border",
+};
+
+function marketNum(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function titleCaseMarket(value: string): string {
+  const small = new Set(["and", "of", "the", "for", "in", "on", "at", "to", "a", "an"]);
+  return value.toLowerCase().split(/(\s+|[-\/])/).map((part, index) => {
+    if (/^\s+$/.test(part) || /^[-/]$/.test(part)) return part;
+    if (index > 0 && small.has(part)) return part;
+    return part.charAt(0).toUpperCase() + part.slice(1);
+  }).join("");
+}
+
+function shortOrigin(origin: string): string {
+  const cleaned = titleCaseMarket(origin.replace(/\s+/g, " ").trim());
+  if (cleaned.length <= 46) return cleaned;
+  const cut = cleaned.slice(0, 44);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${cut.slice(0, lastSpace > 20 ? lastSpace : 44)}…`;
+}
+
+type MarketHeat = "hot" | "warm" | "cold";
+
+function outboundHeat(avgAvail: number | null, avgRpm: number | null): MarketHeat {
+  if ((avgAvail != null && avgAvail >= 4.5) || (avgRpm != null && avgRpm >= 5)) return "hot";
+  if (avgAvail != null && avgAvail <= 2.5) return "cold";
+  return "warm";
+}
+
+function inboundHeat(avgRpm: number | null, avgLoad: number | null): MarketHeat {
+  if ((avgRpm != null && avgRpm >= 4.5) || (avgLoad != null && avgLoad >= 8000)) return "hot";
+  if (avgRpm != null && avgRpm <= 3.2) return "cold";
+  return "warm";
+}
+
+async function fetchUsdaReeferRows(): Promise<UsdaReeferRow[]> {
+  try {
+    const response = await fetch(USDA_REEFER_URL, {
+      headers: { "User-Agent": "RigRevenue/1.0 (market zone)" },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) return [];
+    const data = await response.json() as unknown;
+    return Array.isArray(data) ? data as UsdaReeferRow[] : [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchAaaDieselPrices(): Promise<Array<{ state: string; price: number }>> {
+  try {
+    const response = await fetch(AAA_DIESEL_URL, {
+      headers: { "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15" },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) return [];
+    const html = await response.text();
+    const rows = html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) ?? [];
+    const prices: Array<{ state: string; price: number }> = [];
+    for (const row of rows) {
+      const cells = [...row.matchAll(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi)].map((m) => (m[1] ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+      if (cells.length < 5) continue;
+      const state = cells[0] ?? "";
+      const dieselCell = cells[4] ?? "";
+      if (!state || /^(state|regular)$/i.test(state)) continue;
+      const price = marketNum(dieselCell.replace(/[$,]/g, ""));
+      if (price != null && price > 0 && price < 20) prices.push({ state, price: Math.round(price * 100) / 100 });
+    }
+    const seen = new Set<string>();
+    return prices.filter((p) => (seen.has(p.state) ? false : (seen.add(p.state), true)));
+  } catch {
+    return [];
+  }
+}
+
 export const Actions = {
   getAccountStatus: defineAction({
     request: z.object({ legacyClientId: clientIdSchema, sessionToken: sessionTokenSchema.optional() }),
@@ -1629,12 +1805,20 @@ export const Actions = {
     request: z.object({}),
     response: z.object({ items: z.array(truckingNewsItemSchema), asOf: z.string() }),
     async handler(ctx) {
-      const result = await ctx.tool.web_search("latest US trucking industry news regulations diesel fuel prices freight rates owner operators September 2026");
-      const items = await ctx.inference.complete(
-        `Select up to 10 recent, useful US trucking headlines from these search results. Cover regulations, fuel prices, freight rates, and major industry updates when available. Summaries should be factual and no more than two sentences. Use only a source URL that appears verbatim in the search results. Do not invent publication dates; use null when the search result does not clearly show one.\n\nSearch results:\n${JSON.stringify(result)}`,
-        { schema: z.array(truckingNewsItemSchema).max(10) },
-      );
-      return { items, asOf: new Date().toISOString() };
+      // Free RSS feeds load without any API key. AI curation stays as the fallback when a key is configured.
+      const rssItems = await fetchTruckNewsFromRss();
+      if (rssItems.length > 0) return { items: rssItems, asOf: new Date().toISOString() };
+      try {
+        const result = await ctx.tool.web_search("latest US trucking industry news regulations diesel fuel prices freight rates owner operators");
+        const items = await ctx.inference.complete(
+          `Select up to 10 recent, useful US trucking headlines from these search results. Cover regulations, fuel prices, freight rates, and major industry updates when available. Summaries should be factual and no more than two sentences. Use only a source URL that appears verbatim in the search results. Do not invent publication dates; use null when the search result does not clearly show one.\n\nSearch results:\n${JSON.stringify(result)}`,
+          { schema: z.array(truckingNewsItemSchema).max(10) },
+        );
+        if (items.length > 0) return { items, asOf: new Date().toISOString() };
+      } catch {
+        // Fall through to the honest empty state below.
+      }
+      return { items: [], asOf: new Date().toISOString() };
     },
   }),
 
@@ -1701,20 +1885,34 @@ export const Actions = {
         "https://overpass.kumi.systems/api/interpreter",
         "https://overpass.private.coffee/api/interpreter",
       ];
-      let payload: { elements?: OverpassElement[] } | null = null;
-      for (const endpoint of endpoints) {
-        try {
-          const response = await fetch(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigRevenue/1.0" },
-            body: new URLSearchParams({ data: query }),
-          });
-          if (!response.ok) continue;
+      // Race the public mirrors in parallel so one slow instance can't stall the map.
+      // Each request gets 15 seconds; the first healthy response wins and the rest are aborted.
+      const fetchFromMirror = (endpoint: string, signal: AbortSignal): Promise<{ elements?: OverpassElement[] } | null> =>
+        fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigRevenue/1.0" },
+          body: new URLSearchParams({ data: query }),
+          signal,
+        }).then(async (response) => {
+          if (!response.ok) return null;
           const candidate = await response.json() as { elements?: OverpassElement[]; remark?: string };
-          if (!candidate.remark) { payload = candidate; break; }
-        } catch {
-          // Try the next public mirror.
-        }
+          return candidate.remark ? null : candidate;
+        }).catch(() => null);
+      const controllers = endpoints.map(() => new AbortController());
+      const timeouts = controllers.map((controller) => setTimeout(() => controller.abort(), 15000));
+      let payload: { elements?: OverpassElement[] } | null = null;
+      try {
+        const firstValid = await Promise.any(endpoints.map(async (endpoint, index) => {
+          const result = await fetchFromMirror(endpoint, controllers[index]?.signal ?? new AbortController().signal);
+          if (!result || !Array.isArray(result.elements)) throw new Error("mirror failed");
+          return result;
+        }));
+        payload = firstValid;
+      } catch {
+        payload = null;
+      } finally {
+        timeouts.forEach(clearTimeout);
+        controllers.forEach((controller) => controller.abort());
       }
       if (!payload) throw new Error("Truck services are temporarily unavailable.");
       const places = (payload.elements ?? []).flatMap((element) => {
@@ -1742,6 +1940,152 @@ export const Actions = {
         }];
       }).sort((a, b) => a.distanceMiles - b.distanceMiles).slice(0, 40);
       return { places, asOf: new Date().toISOString() };
+    },
+  }),
+
+  getMarketZones: defineAction({
+    request: z.object({}),
+    response: z.object({
+      ok: z.boolean(),
+      weekEnding: z.string().nullable(),
+      source: z.string(),
+      outbound: z.array(z.object({
+        region: z.string(),
+        label: z.string(),
+        heat: z.enum(["hot", "warm", "cold"]),
+        avgRpm: z.number().nullable(),
+        avgLoad: z.number().nullable(),
+        availability: z.number().nullable(),
+        lanes: z.number(),
+        sampleLane: z.object({ destination: z.string(), midpoint: z.number() }).nullable(),
+      })),
+      inbound: z.array(z.object({
+        city: z.string(),
+        heat: z.enum(["hot", "warm", "cold"]),
+        avgRpm: z.number().nullable(),
+        avgLoad: z.number().nullable(),
+        lanes: z.number(),
+      })),
+      topLanes: z.array(z.object({
+        origin: z.string(),
+        destination: z.string(),
+        midpoint: z.number().nullable(),
+        rpm: z.number().nullable(),
+        miles: z.number().nullable(),
+        availability: z.number().nullable(),
+      })),
+      error: z.string().nullable(),
+    }),
+    async handler() {
+      const rows = await fetchUsdaReeferRows();
+      if (rows.length === 0) {
+        return { ok: false, weekEnding: null, source: "USDA AgTransport", outbound: [], inbound: [], topLanes: [], error: "Live market data is temporarily unavailable. Try again in a few minutes." };
+      }
+      const weekEnding = rows[0]?.date ? rows[0].date.slice(0, 10) : null;
+      const byRegion = new Map<string, UsdaReeferRow[]>();
+      const byDest = new Map<string, UsdaReeferRow[]>();
+      for (const row of rows) {
+        if (row.region) {
+          const list = byRegion.get(row.region) ?? [];
+          list.push(row);
+          byRegion.set(row.region, list);
+        }
+        if (row.destination) {
+          const list = byDest.get(row.destination) ?? [];
+          list.push(row);
+          byDest.set(row.destination, list);
+        }
+      }
+      const avg = (values: Array<number | null>): number | null => {
+        const valid = values.filter((v): v is number => v != null);
+        return valid.length ? Math.round((valid.reduce((a, b) => a + b, 0) / valid.length) * 100) / 100 : null;
+      };
+      const outbound = [...byRegion.entries()].map(([region, list]) => {
+        const rpms = list.map((r) => {
+          const direct = marketNum(r.rpm);
+          if (direct != null) return direct;
+          const mid = marketNum(r.midpoint);
+          const dist = marketNum(r.distance);
+          return mid != null && dist ? mid / dist : null;
+        });
+        const avgRpm = avg(rpms);
+        const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
+        const availability = avg(list.map((r) => marketNum(r.availability)));
+        const richest = [...list].sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0))[0];
+        const richestMid = richest ? marketNum(richest.midpoint) : null;
+        return {
+          region,
+          label: MARKET_REGION_LABELS[region] ?? titleCaseMarket(region),
+          heat: outboundHeat(availability, avgRpm),
+          avgRpm,
+          avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
+          availability,
+          lanes: list.length,
+          sampleLane: richest && richestMid != null ? { destination: titleCaseMarket(richest.destination ?? ""), midpoint: Math.round(richestMid) } : null,
+        };
+      }).sort((a, b) => {
+        const order = { hot: 0, warm: 1, cold: 2 } as const;
+        return order[a.heat] - order[b.heat] || (b.avgRpm ?? 0) - (a.avgRpm ?? 0);
+      });
+      const inbound = [...byDest.entries()].map(([city, list]) => {
+        const rpms = list.map((r) => {
+          const direct = marketNum(r.rpm);
+          if (direct != null) return direct;
+          const mid = marketNum(r.midpoint);
+          const dist = marketNum(r.distance);
+          return mid != null && dist ? mid / dist : null;
+        });
+        const avgRpm = avg(rpms);
+        const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
+        return {
+          city: titleCaseMarket(city),
+          heat: inboundHeat(avgRpm, avgLoad),
+          avgRpm,
+          avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
+          lanes: list.length,
+        };
+      }).sort((a, b) => {
+        const order = { hot: 0, warm: 1, cold: 2 } as const;
+        return order[a.heat] - order[b.heat] || (b.avgLoad ?? 0) - (a.avgLoad ?? 0);
+      });
+      const topLanes = [...rows]
+        .sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0))
+        .slice(0, 12)
+        .map((r) => ({
+          origin: shortOrigin(r.origin ?? ""),
+          destination: titleCaseMarket(r.destination ?? ""),
+          midpoint: marketNum(r.midpoint) != null ? Math.round(marketNum(r.midpoint) as number) : null,
+          rpm: (() => {
+            const direct = marketNum(r.rpm);
+            if (direct != null) return Math.round(direct * 100) / 100;
+            const mid = marketNum(r.midpoint);
+            const dist = marketNum(r.distance);
+            return mid != null && dist ? Math.round((mid / dist) * 100) / 100 : null;
+          })(),
+          miles: marketNum(r.distance) != null ? Math.round(marketNum(r.distance) as number) : null,
+          availability: marketNum(r.availability),
+        }));
+      return { ok: true, weekEnding, source: "USDA AgTransport", outbound, inbound, topLanes, error: null };
+    },
+  }),
+
+  getDieselPrices: defineAction({
+    request: z.object({}),
+    response: z.object({
+      ok: z.boolean(),
+      asOf: z.string().nullable(),
+      source: z.string(),
+      national: z.number().nullable(),
+      states: z.array(z.object({ state: z.string(), price: z.number() })),
+      error: z.string().nullable(),
+    }),
+    async handler() {
+      const states = await fetchAaaDieselPrices();
+      if (states.length === 0) {
+        return { ok: false, asOf: null, source: "AAA", national: null, states: [], error: "Diesel prices are temporarily unavailable. Try again in a few minutes." };
+      }
+      const national = Math.round((states.reduce((sum, s) => sum + s.price, 0) / states.length) * 100) / 100;
+      return { ok: true, asOf: new Date().toISOString().slice(0, 10), source: "AAA", national, states: states.sort((a, b) => a.price - b.price), error: null };
     },
   }),
 } satisfies ActionsModule;
