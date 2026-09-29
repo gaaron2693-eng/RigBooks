@@ -17,7 +17,7 @@ const pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes
 const drizzleDb = drizzle(pool, { schema });
 const db = Object.assign(drizzleDb, { batch: async (queries: Array<PromiseLike<unknown>>) => Promise.all(queries) });
 const clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-const migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql"] as const;
+const migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql"] as const;
 const migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 
 function requiredEnv(name: string): string {
