@@ -511,19 +511,21 @@ export const Actions = {
   }),
 
 
-  adminPurgeAccountByEmail: defineAction({
-    request: z.object({ email: emailSchema, oneTimeSecret: z.string().min(1) }),
-    response: z.object({ ok: z.literal(true), deleted: z.boolean() }),
+  adminResetPassword: defineAction({
+    request: z.object({ email: emailSchema, oneTimeSecret: z.string().min(1), tempPassword: passwordSchema }),
+    response: z.object({ ok: z.literal(true), reset: z.boolean() }),
     async handler(ctx, args) {
-      if (args.oneTimeSecret !== "75867d0acd31c11570f02cfabfab9a309f6e546fc10820740733b1596ecc1cb1") throw new Error("Not authorized.");
+      if (args.oneTimeSecret !== "ca86942769010907000588dac74a62bb9586d89d31b4ef181c7a0c7893dd450d") throw new Error("Not authorized.");
       const db = ctx.db<typeof schema>();
       const normalizedEmail = args.email.trim().toLowerCase();
       const account = (await db.select().from(schema.accounts).where(eq(schema.accounts.email, normalizedEmail)).limit(1))[0];
-      if (!account) return { ok: true as const, deleted: false };
-      if (account.role === "creator") throw new Error("Refusing to touch the creator account.");
-      await db.delete(schema.accounts).where(eq(schema.accounts.id, account.id));
+      if (!account) return { ok: true as const, reset: false };
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const passwordSalt = bytesToHex(salt);
+      const passwordHash = await derivePasswordHash(args.tempPassword, passwordSalt);
+      await db.update(schema.accounts).set({ passwordHash, passwordSalt, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
       ctx.invalidateQueries();
-      return { ok: true as const, deleted: true };
+      return { ok: true as const, reset: true };
     },
   }),
 
