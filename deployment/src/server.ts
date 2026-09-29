@@ -173,7 +173,8 @@ const server = Bun.serve({
       try { await pool.query("SELECT 1"); return json({ ok: true }); } catch { return json({ ok: false }, 503); }
   
 
-  const legacyHost = request.headers.get("host")?.split(":")[0]?.toLowerCase();
+    }
+    const legacyHost = request.headers.get("host")?.split(":")[0]?.toLowerCase();
     if (legacyHost === "rigbooks.onrender.com") {
       return Response.redirect(`https://rigrevenue.onrender.com${url.pathname}${url.search}`, 301);
     }
