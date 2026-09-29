@@ -510,6 +510,23 @@ export const Actions = {
     },
   }),
 
+
+  adminPurgeAccountByEmail: defineAction({
+    request: z.object({ email: emailSchema, oneTimeSecret: z.string().min(1) }),
+    response: z.object({ ok: z.literal(true), deleted: z.boolean() }),
+    async handler(ctx, args) {
+      if (args.oneTimeSecret !== "75867d0acd31c11570f02cfabfab9a309f6e546fc10820740733b1596ecc1cb1") throw new Error("Not authorized.");
+      const db = ctx.db<typeof schema>();
+      const normalizedEmail = args.email.trim().toLowerCase();
+      const account = (await db.select().from(schema.accounts).where(eq(schema.accounts.email, normalizedEmail)).limit(1))[0];
+      if (!account) return { ok: true as const, deleted: false };
+      if (account.role === "creator") throw new Error("Refusing to touch the creator account.");
+      await db.delete(schema.accounts).where(eq(schema.accounts.id, account.id));
+      ctx.invalidateQueries();
+      return { ok: true as const, deleted: true };
+    },
+  }),
+
   signOut: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema.optional() }),
     response: z.object({ ok: z.literal(true) }),
