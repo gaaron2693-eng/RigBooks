@@ -523,7 +523,7 @@ export const Actions = {
       const salt = crypto.getRandomValues(new Uint8Array(16));
       const passwordSalt = bytesToHex(salt);
       const passwordHash = await derivePasswordHash(args.tempPassword, passwordSalt);
-      await db.update(schema.accounts).set({ passwordHash, passwordSalt, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
+      await db.update(schema.accounts).set({ passwordHash, passwordSalt }).where(eq(schema.accounts.id, account.id));
       ctx.invalidateQueries();
       return { ok: true as const, reset: true };
     },
