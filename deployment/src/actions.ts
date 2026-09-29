@@ -219,6 +219,61 @@ async function requireAccount(ctx: Ctx, sessionToken: string): Promise<typeof sc
   return row;
 }
 
+// Stripe test-mode plans. These are TEST price ids — swap for live price ids at go-live.
+const stripeTestPriceByPlan = {
+  weekly: "price_1UKtygLTe9osv09oYHxPoJys",
+  monthly: "price_1UKtyhLTe9osv09owS82qxkq",
+  yearly: "price_1UKtyiLTe9osv09oFHCbM89H",
+} as const;
+const stripeTestPlanByPrice: Record<string, "weekly" | "monthly" | "yearly"> = {
+  price_1UKtygLTe9osv09oYHxPoJys: "weekly",
+  price_1UKtyhLTe9osv09owS82qxkq: "monthly",
+  price_1UKtyiLTe9osv09oFHCbM89H: "yearly",
+};
+const planSchema = z.enum(["weekly", "monthly", "yearly"]);
+
+function stripeSecretKey(): string {
+  const key = process.env.STRIPE_SECRET_KEY?.trim();
+  if (!key) throw new Error("Stripe payments are not connected yet.");
+  if (!key.startsWith("sk_test_")) throw new Error("Stripe is not in test mode.");
+  return key;
+}
+
+function stripeAuthHeader(key: string): string {
+  return `Basic ${Buffer.from(`${key}:`).toString("base64")}`;
+}
+
+async function stripeApi(path: string, method: "GET" | "POST", params?: Record<string, string>): Promise<any> {
+  const key = stripeSecretKey();
+  const response = await fetch(`https://api.stripe.com/v1${path}`, {
+    method,
+    headers: { Authorization: stripeAuthHeader(key), "Content-Type": "application/x-www-form-urlencoded" },
+    body: method === "POST" ? new URLSearchParams(params ?? {}) : undefined,
+  });
+  const payload = await response.json().catch(() => null) as any;
+  if (!response.ok) throw new Error(payload?.error?.message || `Stripe returned ${response.status}.`);
+  return payload;
+}
+
+async function accountHasProAccess(ctx: Ctx, account: { id: number; role: string }): Promise<boolean> {
+  if (account.role !== "standard") return true;
+  const row = (await ctx.db<typeof schema>().select().from(schema.stripeSubscriptions).where(eq(schema.stripeSubscriptions.accountId, account.id)).limit(1))[0];
+  return !!row && (row.status === "active" || row.status === "trialing");
+}
+
+async function getOrCreateStripeCustomer(ctx: Ctx, account: typeof schema.accounts.$inferSelect): Promise<string> {
+  const db = ctx.db<typeof schema>();
+  const existing = (await db.select().from(schema.stripeSubscriptions).where(eq(schema.stripeSubscriptions.accountId, account.id)).limit(1))[0];
+  if (existing?.stripeCustomerId) return existing.stripeCustomerId;
+  const params: Record<string, string> = { name: account.displayName, "metadata[accountId]": String(account.id) };
+  if (account.email) params.email = account.email;
+  const customer = await stripeApi("/customers", "POST", params);
+  const customerId = String(customer.id);
+  if (existing) await db.update(schema.stripeSubscriptions).set({ stripeCustomerId: customerId, updatedAt: new Date() }).where(eq(schema.stripeSubscriptions.id, existing.id));
+  else await db.insert(schema.stripeSubscriptions).values({ accountId: account.id, stripeCustomerId: customerId, status: "none" });
+  return customerId;
+}
+
 let prePassColumnReady = false;
 async function ensurePrePassColumn(ctx: Ctx): Promise<void> {
   if (prePassColumnReady) return;
@@ -1841,7 +1896,7 @@ export const Actions = {
     response: roadRouteSchema,
     async handler(ctx, args): Promise<z.infer<typeof roadRouteSchema>> {
       const account = await requireAccount(ctx, args.sessionToken);
-      if (account.role === "standard") throw new Error("Road for Truckers requires RigRevenue Pro.");
+      if (!(await accountHasProAccess(ctx, account))) throw new Error("Road for Truckers requires RigRevenue Pro.");
       await ensurePrePassColumn(ctx);
       const truck = (await ctx.db<typeof schema>().select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
       if (!truck) throw new Error("Add your truck profile before planning a route.");
@@ -2248,6 +2303,105 @@ export const Actions = {
       }
       const national = Math.round((states.reduce((sum, s) => sum + s.price, 0) / states.length) * 100) / 100;
       return { ok: true, asOf: new Date().toISOString().slice(0, 10), source: "AAA", national, states: states.sort((a, b) => a.price - b.price), error: null };
+    },
+  }),
+
+  getSubscriptionStatus: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({
+      hasPro: z.boolean(),
+      lifetimePro: z.boolean(),
+      plan: planSchema.nullable(),
+      status: z.string(),
+      renewsAt: z.string().nullable(),
+      cancelAtPeriodEnd: z.boolean(),
+    }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const row = (await ctx.db<typeof schema>().select().from(schema.stripeSubscriptions).where(eq(schema.stripeSubscriptions.accountId, account.id)).limit(1))[0];
+      return {
+        hasPro: await accountHasProAccess(ctx, account),
+        lifetimePro: account.role !== "standard",
+        plan: row?.plan ?? null,
+        status: row?.status ?? "none",
+        renewsAt: row?.currentPeriodEnd ? row.currentPeriodEnd.toISOString() : null,
+        cancelAtPeriodEnd: row?.cancelAtPeriodEnd ?? false,
+      };
+    },
+  }),
+
+  createCheckoutSession: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, plan: planSchema }),
+    response: z.object({ url: z.string().url() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const customerId = await getOrCreateStripeCustomer(ctx, account);
+      const session = await stripeApi("/checkout/sessions", "POST", {
+        "mode": "subscription",
+        "customer": customerId,
+        "payment_method_types[0]": "card",
+        "payment_method_types[1]": "cashapp",
+        "line_items[0][price]": stripeTestPriceByPlan[args.plan],
+        "line_items[0][quantity]": "1",
+        "client_reference_id": String(account.id),
+        "metadata[accountId]": String(account.id),
+        "subscription_data[metadata][accountId]": String(account.id),
+        "success_url": "https://rigrevenue.onrender.com/?checkout=success&session_id={CHECKOUT_SESSION_ID}",
+        "cancel_url": "https://rigrevenue.onrender.com/?checkout=cancelled",
+      });
+      if (!session.url) throw new Error("Stripe did not return a checkout URL.");
+      return { url: session.url };
+    },
+  }),
+
+  verifyCheckoutSession: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, sessionId: z.string().min(1).max(200) }),
+    response: z.object({ hasPro: z.boolean(), plan: planSchema.nullable(), renewsAt: z.string().nullable() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const session = await stripeApi(`/checkout/sessions/${encodeURIComponent(args.sessionId)}`, "GET");
+      const sessionAccountId = Number(session?.metadata?.accountId ?? session?.client_reference_id) || null;
+      if (sessionAccountId !== account.id) throw new Error("This checkout session belongs to a different account.");
+      let plan: "weekly" | "monthly" | "yearly" | null = null;
+      let renewsAt: string | null = null;
+      const subscriptionId = typeof session.subscription === "string" ? session.subscription : null;
+      if (session.payment_status === "paid" && subscriptionId) {
+        const subscription = await stripeApi(`/subscriptions/${subscriptionId}`, "GET");
+        const priceId = subscription?.items?.data?.[0]?.price?.id;
+        plan = (typeof priceId === "string" && stripeTestPlanByPrice[priceId]) || null;
+        const periodEnd = typeof subscription.current_period_end === "number" ? new Date(subscription.current_period_end * 1000) : null;
+        renewsAt = periodEnd ? periodEnd.toISOString() : null;
+        const values = {
+          stripeCustomerId: String(subscription.customer),
+          stripeSubscriptionId: subscriptionId,
+          plan,
+          status: String(subscription.status || "unknown"),
+          currentPeriodEnd: periodEnd,
+          cancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end),
+          updatedAt: new Date(),
+        };
+        const existing = (await db.select().from(schema.stripeSubscriptions).where(eq(schema.stripeSubscriptions.accountId, account.id)).limit(1))[0];
+        if (existing) await db.update(schema.stripeSubscriptions).set(values).where(eq(schema.stripeSubscriptions.id, existing.id));
+        else await db.insert(schema.stripeSubscriptions).values({ accountId: account.id, ...values });
+      }
+      return { hasPro: await accountHasProAccess(ctx, account), plan, renewsAt };
+    },
+  }),
+
+  createBillingPortalSession: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ url: z.string().url() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const row = (await ctx.db<typeof schema>().select().from(schema.stripeSubscriptions).where(eq(schema.stripeSubscriptions.accountId, account.id)).limit(1))[0];
+      if (!row?.stripeCustomerId) throw new Error("No billing account found yet.");
+      const portal = await stripeApi("/billing_portal/sessions", "POST", {
+        customer: row.stripeCustomerId,
+        return_url: "https://rigrevenue.onrender.com/",
+      });
+      if (!portal.url) throw new Error("Stripe did not return a billing portal URL.");
+      return { url: portal.url };
     },
   }),
 } satisfies ActionsModule;

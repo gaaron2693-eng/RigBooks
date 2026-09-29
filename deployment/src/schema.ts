@@ -263,8 +263,7 @@ export const documents = pgTable("documents", {
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
 });
 
-export const companyProfile = pgTable("company_profile", {
-  id: serial("id").primaryKey(),
+export const companyProfile = pgTable("company_profile", {  id: serial("id").primaryKey(),
   accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
   companyName: text("company_name").notNull(),
   address: text("address"),
@@ -276,3 +275,19 @@ export const companyProfile = pgTable("company_profile", {
   logoBlobKey: text("logo_blob_key"),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
 });
+
+export const stripeSubscriptions = pgTable("stripe_subscriptions", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  stripeCustomerId: text("stripe_customer_id").notNull(),
+  stripeSubscriptionId: text("stripe_subscription_id"),
+  plan: text("plan", { enum: ["weekly", "monthly", "yearly"] }),
+  status: text("status").notNull().default("none"),
+  currentPeriodEnd: timestamp("current_period_end", { mode: "date", withTimezone: true }),
+  cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [
+  uniqueIndex("stripe_subscriptions_account_id_unique").on(table.accountId),
+  uniqueIndex("stripe_subscriptions_stripe_subscription_id_unique").on(table.stripeSubscriptionId),
+]);
