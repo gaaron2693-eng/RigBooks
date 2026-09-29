@@ -10,6 +10,8 @@ const authProviderSchema = z.enum(["google", "apple", "muse", "email"]);
 const clientIdSchema = z.string().trim().min(16).max(128);
 const emailSchema = z.string().trim().email().max(160);
 const passwordSchema = z.string().min(10).max(128);
+const hosStatusSchema = z.enum(["off_duty", "sleeper", "driving", "on_duty"]);
+const hosEventSchema = z.object({ id: z.number(), status: hosStatusSchema, startedAt: z.string() });
 const sessionTokenSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const samScopeSchema = z.enum([
   "app_help",
@@ -523,6 +525,31 @@ export const Actions = {
     },
   }),
 
+  changePassword: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      currentPassword: passwordSchema,
+      newPassword: passwordSchema,
+    }),
+    response: z.object({ ok: z.literal(true), sessionToken: sessionTokenSchema }),
+    async handler(ctx, args): Promise<{ ok: true; sessionToken: string }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      if (account.authProvider !== "email" || !account.passwordHash || !account.passwordSalt) throw new Error("Password changes are only available for email sign-in accounts.");
+      const currentHash = await derivePasswordHash(args.currentPassword, account.passwordSalt);
+      if (!safeEqualHex(account.passwordHash, currentHash)) throw new Error("Your current password is incorrect.");
+      const repeatedHash = await derivePasswordHash(args.newPassword, account.passwordSalt);
+      if (safeEqualHex(account.passwordHash, repeatedHash)) throw new Error("Choose a new password that is different from your current password.");
+      const replacementSalt = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+      const replacementHash = await derivePasswordHash(args.newPassword, replacementSalt);
+      const db = ctx.db<typeof schema>();
+      await db.update(schema.accounts).set({ passwordHash: replacementHash, passwordSalt: replacementSalt, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
+      await db.delete(schema.accountSessions).where(eq(schema.accountSessions.accountId, account.id));
+      const sessionToken = await issueSession(ctx, account.id);
+      ctx.invalidateQueries();
+      return { ok: true, sessionToken };
+    },
+  }),
+
   deleteMyAccount: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema }),
     response: z.object({ ok: z.literal(true) }),
@@ -665,6 +692,62 @@ export const Actions = {
       await db.update(schema.compInvites).set({ redeemedByClientId: args.clientId, redeemedAt: new Date() }).where(eq(schema.compInvites.id, invite.id));
       ctx.invalidateQueries();
       return { ok: true, label: invite.label };
+    },
+  }),
+
+  getHosState: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({
+      currentStatus: hosStatusSchema,
+      events: z.array(hosEventSchema),
+      motionPromptMinutes: z.number(),
+      gpsPromptsEnabled: z.boolean(),
+      serverNow: z.string(),
+    }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const since = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+      const rows = await db.select().from(schema.hosStatusEvents).where(and(eq(schema.hosStatusEvents.accountId, account.id), gte(schema.hosStatusEvents.startedAt, since))).orderBy(asc(schema.hosStatusEvents.startedAt));
+      const settings = (await db.select().from(schema.hosSettings).where(eq(schema.hosSettings.accountId, account.id)).limit(1))[0];
+      return {
+        currentStatus: rows[rows.length - 1]?.status ?? "off_duty",
+        events: rows.map((row) => ({ id: row.id, status: row.status, startedAt: row.startedAt.toISOString() })),
+        motionPromptMinutes: settings?.motionPromptMinutes ?? 5,
+        gpsPromptsEnabled: settings?.gpsPromptsEnabled ?? true,
+        serverNow: new Date().toISOString(),
+      };
+    },
+  }),
+
+  changeHosStatus: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, status: hosStatusSchema }),
+    response: z.object({ ok: z.literal(true), event: hosEventSchema }),
+    async handler(ctx, args): Promise<{ ok: true; event: z.infer<typeof hosEventSchema> }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const latest = (await db.select().from(schema.hosStatusEvents).where(eq(schema.hosStatusEvents.accountId, account.id)).orderBy(desc(schema.hosStatusEvents.startedAt)).limit(1))[0];
+      if (latest?.status === args.status) return { ok: true, event: { id: latest.id, status: latest.status, startedAt: latest.startedAt.toISOString() } };
+      const inserted = await db.insert(schema.hosStatusEvents).values({ accountId: account.id, status: args.status, startedAt: new Date() }).returning();
+      const event = inserted[0];
+      if (!event) throw new Error("Could not save that duty status.");
+      ctx.invalidateQueries();
+      return { ok: true, event: { id: event.id, status: event.status, startedAt: event.startedAt.toISOString() } };
+    },
+  }),
+
+  saveHosSettings: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, motionPromptMinutes: z.number().int().min(1).max(30), gpsPromptsEnabled: z.boolean() }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const existing = (await db.select({ id: schema.hosSettings.id }).from(schema.hosSettings).where(eq(schema.hosSettings.accountId, account.id)).limit(1))[0];
+      const values = { accountId: account.id, motionPromptMinutes: args.motionPromptMinutes, gpsPromptsEnabled: args.gpsPromptsEnabled, updatedAt: new Date() };
+      if (existing) await db.update(schema.hosSettings).set(values).where(eq(schema.hosSettings.id, existing.id));
+      else await db.insert(schema.hosSettings).values(values);
+      ctx.invalidateQueries();
+      return { ok: true };
     },
   }),
 
