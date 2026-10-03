@@ -170,6 +170,12 @@ export const paySettings = pgTable("pay_settings", {
   weeklyMaintenanceEscrowCents: integer("weekly_maintenance_escrow_cents").notNull().default(0),
   weeklyInsuranceCents: integer("weekly_insurance_cents").notNull().default(0),
   weeklyOtherDeductionsCents: integer("weekly_other_deductions_cents").notNull().default(0),
+  fuelCostPerMileCents: integer("fuel_cost_per_mile_cents").notNull().default(0),
+  maintenanceCostPerMileCents: integer("maintenance_cost_per_mile_cents").notNull().default(0),
+  insuranceCostPerMileCents: integer("insurance_cost_per_mile_cents").notNull().default(0),
+  truckCostPerMileCents: integer("truck_cost_per_mile_cents").notNull().default(0),
+  otherCostPerMileCents: integer("other_cost_per_mile_cents").notNull().default(0),
+  factoringFeeBasisPoints: integer("factoring_fee_basis_points").notNull().default(0),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true })
     .notNull()
     .$defaultFn(() => new Date()),
