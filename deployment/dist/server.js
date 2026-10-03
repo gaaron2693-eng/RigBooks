@@ -75,6 +75,8 @@ var accounts = pgTable("accounts", {
   role: text("role", { enum: ["standard", "creator", "tester"] }).notNull().default("standard"),
   accessLabel: text("access_label"),
   profileImageBlobKey: text("profile_image_blob_key"),
+  backgroundImageBlobKey: text("background_image_blob_key"),
+  backgroundOpacity: integer("background_opacity").notNull().default(18),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [
@@ -614,6 +616,9 @@ var accountSchema = z.object({
   authProvider: authProviderSchema,
   role: accessRoleSchema,
   accessLabel: z.string().nullable(),
+  profileImageUrl: z.string().nullable(),
+  backgroundImageUrl: z.string().nullable(),
+  backgroundOpacity: z.number().int().min(5).max(30),
   createdAt: z.string()
 });
 var driverReplySchema = z.object({
@@ -1173,7 +1178,7 @@ var Actions = {
       return {
         authenticated: Boolean(account),
         suggestedName: viewerDisplayName(viewer),
-        account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() } : null,
+        account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() } : null,
         legacyRole: inheritedRole,
         sessionToken: activeToken
       };
@@ -1220,7 +1225,7 @@ var Actions = {
       if (role === "creator")
         await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
-      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() }, sessionToken };
+      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() }, sessionToken };
     }
   }),
   signInWithEmail: defineAction({
@@ -1237,7 +1242,7 @@ var Actions = {
         throw new Error("Email or password is incorrect.");
       const sessionToken = await issueSession(ctx, account.id);
       ctx.invalidateQueries();
-      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() }, sessionToken };
+      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() }, sessionToken };
     }
   }),
   signOut: defineAction({
@@ -1305,7 +1310,7 @@ var Actions = {
       const viewerId = viewerIdentity(viewer);
       const existing = (await db.select().from(accounts).where(eq(accounts.viewerFbid, viewerId)).limit(1))[0];
       if (existing)
-        return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, profileImageUrl: existing.profileImageBlobKey ? await ctx.blobs.getUrl(existing.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: existing.createdAt.toISOString() };
+        return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, profileImageUrl: existing.profileImageBlobKey ? await ctx.blobs.getUrl(existing.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: existing.backgroundImageBlobKey ? await ctx.blobs.getUrl(existing.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: existing.backgroundOpacity, createdAt: existing.createdAt.toISOString() };
       const legacy = (await db.select().from(subscriptionAccess).where(eq(subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role = viewer.isOwner ? "creator" : legacy?.role ?? "standard";
       const accessLabel = viewer.isOwner ? "RigRevenue creator" : legacy?.label ?? null;
@@ -1323,7 +1328,7 @@ var Actions = {
       if (role === "creator")
         await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
-      return { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() };
+      return { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() };
     }
   }),
   updateAccount: defineAction({
@@ -1369,6 +1374,54 @@ var Actions = {
       await ctx.db().update(accounts).set({ profileImageBlobKey: null, updatedAt: new Date }).where(eq(accounts.id, account.id));
       if (account.profileImageBlobKey)
         await ctx.blobs.delete(account.profileImageBlobKey).catch(() => {
+          return;
+        });
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
+  saveCustomBackground: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      imageDataBase64: z.string().max(8000000),
+      imageMimeType: z.enum(["image/jpeg", "image/png", "image/webp"])
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const bytes = Buffer.from(args.imageDataBase64, "base64");
+      if (bytes.byteLength === 0 || bytes.byteLength > 5000000)
+        throw new Error("Background image must be 5 MB or smaller.");
+      const ext = args.imageMimeType === "image/png" ? "png" : args.imageMimeType === "image/webp" ? "webp" : "jpg";
+      const nextKey = `backgrounds/${account.id}-${crypto.randomUUID()}.${ext}`;
+      await ctx.blobs.put(nextKey, bytes, { contentType: args.imageMimeType });
+      await ctx.db().update(accounts).set({ backgroundImageBlobKey: nextKey, updatedAt: new Date }).where(eq(accounts.id, account.id));
+      if (account.backgroundImageBlobKey)
+        await ctx.blobs.delete(account.backgroundImageBlobKey).catch(() => {
+          return;
+        });
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
+  setCustomBackgroundOpacity: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, opacity: z.number().int().min(5).max(30) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      await ctx.db().update(accounts).set({ backgroundOpacity: args.opacity, updatedAt: new Date }).where(eq(accounts.id, account.id));
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
+  removeCustomBackground: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      await ctx.db().update(accounts).set({ backgroundImageBlobKey: null, updatedAt: new Date }).where(eq(accounts.id, account.id));
+      if (account.backgroundImageBlobKey)
+        await ctx.blobs.delete(account.backgroundImageBlobKey).catch(() => {
           return;
         });
       ctx.invalidateQueries();
@@ -3427,7 +3480,7 @@ var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql", "010_yard_post_photos.sql", "011_profile_image.sql", "012_yard_moderation_logs.sql", "013_hazmat_truck_brand.sql"];
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql", "010_yard_post_photos.sql", "011_profile_image.sql", "012_yard_moderation_logs.sql", "013_hazmat_truck_brand.sql", "014_custom_app_background.sql"];
 var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
@@ -3583,7 +3636,7 @@ async function serveStatic(pathname) {
   if (!await file.exists())
     file = Bun.file(join(clientRoot, "index.html"));
   const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
-  return new Response(file, { headers: { "Content-Type": mime[extname(file.name || safePath)] || "application/octet-stream", "Cache-Control": requested === "index.html" ? "no-cache" : "public, max-age=31536000, immutable", "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob: https://tile.openstreetmap.org https://basemaps.cartocdn.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; script-src 'self' https://unpkg.com; worker-src 'self' blob:; connect-src 'self' https://api.openai.com https://nominatim.openstreetmap.org https://router.project-osrm.org https://valhalla1.openstreetmap.de https://overpass-api.de https://overpass.kumi.systems https://overpass.private.coffee https://basemaps.cartocdn.com; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self'" } });
+  return new Response(file, { headers: { "Content-Type": mime[extname(file.name || safePath)] || "application/octet-stream", "Cache-Control": requested === "index.html" ? "no-cache" : "public, max-age=31536000, immutable", "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob: https://tile.openstreetmap.org https://tiles.openfreemap.org; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; script-src 'self' https://unpkg.com; worker-src 'self' blob:; connect-src 'self' https://api.openai.com https://nominatim.openstreetmap.org https://router.project-osrm.org https://valhalla1.openstreetmap.de https://overpass-api.de https://overpass.kumi.systems https://overpass.private.coffee https://tiles.openfreemap.org; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self'" } });
 }
 async function verifyStripeSignature(payload, header, secret) {
   const fields = new Map;
