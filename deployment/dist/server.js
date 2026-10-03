@@ -60,6 +60,7 @@ __export(exports_schema, {
   stripeSubscriptions: () => stripeSubscriptions,
   subscriptionAccess: () => subscriptionAccess,
   truckProfiles: () => truckProfiles,
+  walletDocuments: () => walletDocuments,
   workShifts: () => workShifts,
   yardModerationLogs: () => yardModerationLogs
 });
@@ -383,6 +384,24 @@ var yardModerationLogs = pgTable("yard_moderation_logs", {
   reason: text("reason").notNull(),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [index("yard_moderation_logs_created_at_idx").on(table.createdAt)]);
+var walletDocuments = pgTable("wallet_documents", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  category: text("category", { enum: ["cdl", "medical_card", "vehicle_registration", "insurance_card", "ifta_license", "other"] }).notNull(),
+  name: text("name").notNull(),
+  issuingAuthority: text("issuing_authority"),
+  issueDate: text("issue_date"),
+  expiryDate: text("expiry_date"),
+  notes: text("notes"),
+  frontPhotoKey: text("front_photo_key").notNull(),
+  frontMimeType: text("front_mime_type").notNull(),
+  backPhotoKey: text("back_photo_key"),
+  backMimeType: text("back_mime_type"),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [
+  index("wallet_documents_account_expiry_idx").on(table.accountId, table.expiryDate)
+]);
 
 // src/actions.ts
 var driverTypeSchema = z.enum(["company_driver", "lease_purchase", "owner_operator", "hourly_driver"]);
@@ -633,6 +652,21 @@ async function openAiChat(messages, maxTokens, temperature, jsonMode = false) {
     return { available: false, text: null };
   }
 }
+var walletDocumentCategorySchema = z.enum(["cdl", "medical_card", "vehicle_registration", "insurance_card", "ifta_license", "other"]);
+var walletPhotoMimeSchema = z.enum(["image/jpeg", "image/png", "image/webp"]);
+var walletDocumentSchema = z.object({
+  id: z.number(),
+  category: walletDocumentCategorySchema,
+  name: z.string(),
+  issuingAuthority: z.string().nullable(),
+  issueDate: z.string().nullable(),
+  expiryDate: z.string().nullable(),
+  notes: z.string().nullable(),
+  frontPhotoUrl: z.string(),
+  backPhotoUrl: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
 var accountSchema = z.object({
   id: z.number(),
   displayName: z.string(),
@@ -2304,6 +2338,187 @@ var Actions = {
       return { ok: true };
     }
   }),
+  listWalletDocuments: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ documents: z.array(walletDocumentSchema) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const rows = await ctx.db().select().from(walletDocuments).where(eq(walletDocuments.accountId, account.id)).orderBy(asc(walletDocuments.expiryDate), desc(walletDocuments.createdAt));
+      return { documents: await Promise.all(rows.map(async (row) => ({
+        id: row.id,
+        category: row.category,
+        name: row.name,
+        issuingAuthority: row.issuingAuthority,
+        issueDate: row.issueDate,
+        expiryDate: row.expiryDate,
+        notes: row.notes,
+        frontPhotoUrl: await ctx.blobs.getUrl(row.frontPhotoKey, { expiresInSeconds: 3600 }),
+        backPhotoUrl: row.backPhotoKey ? await ctx.blobs.getUrl(row.backPhotoKey, { expiresInSeconds: 3600 }) : null,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString()
+      }))) };
+    }
+  }),
+  addWalletDocument: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      category: walletDocumentCategorySchema,
+      name: z.string().trim().min(1).max(160),
+      issuingAuthority: z.string().max(160).optional(),
+      issueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      expiryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      notes: z.string().max(1000).optional(),
+      frontPhotoDataBase64: z.string().max(16000000),
+      frontMimeType: walletPhotoMimeSchema,
+      backPhotoDataBase64: z.string().max(16000000).optional(),
+      backMimeType: walletPhotoMimeSchema.optional()
+    }),
+    response: z.object({ id: z.number() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const frontBytes = Buffer.from(args.frontPhotoDataBase64, "base64");
+      const backBytes = args.backPhotoDataBase64 ? Buffer.from(args.backPhotoDataBase64, "base64") : null;
+      if (frontBytes.byteLength > 1e7 || backBytes && backBytes.byteLength > 1e7)
+        throw new Error("Each document photo must be under 10 MB.");
+      const ext = (mime) => mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
+      const frontPhotoKey = `wallet-docs/${crypto.randomUUID()}.${ext(args.frontMimeType)}`;
+      const backPhotoKey = backBytes && args.backMimeType ? `wallet-docs/${crypto.randomUUID()}.${ext(args.backMimeType)}` : null;
+      await ctx.blobs.put(frontPhotoKey, frontBytes, { contentType: args.frontMimeType });
+      try {
+        if (backPhotoKey && backBytes && args.backMimeType)
+          await ctx.blobs.put(backPhotoKey, backBytes, { contentType: args.backMimeType });
+        const inserted = (await ctx.db().insert(walletDocuments).values({
+          accountId: account.id,
+          category: args.category,
+          name: args.name.trim(),
+          issuingAuthority: cleanOptional(args.issuingAuthority),
+          issueDate: args.issueDate || null,
+          expiryDate: args.expiryDate || null,
+          notes: cleanOptional(args.notes),
+          frontPhotoKey,
+          frontMimeType: args.frontMimeType,
+          backPhotoKey,
+          backMimeType: backPhotoKey ? args.backMimeType ?? null : null
+        }).returning({ id: walletDocuments.id }))[0];
+        if (!inserted)
+          throw new Error("Could not save the document.");
+        ctx.invalidateQueries();
+        return { id: inserted.id };
+      } catch (error) {
+        await ctx.blobs.delete(frontPhotoKey).catch(() => {
+          return;
+        });
+        if (backPhotoKey)
+          await ctx.blobs.delete(backPhotoKey).catch(() => {
+            return;
+          });
+        throw error;
+      }
+    }
+  }),
+  updateWalletDocument: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      id: z.number().int().positive(),
+      category: walletDocumentCategorySchema,
+      name: z.string().trim().min(1).max(160),
+      issuingAuthority: z.string().max(160).optional(),
+      issueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      expiryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      notes: z.string().max(1000).optional(),
+      frontPhotoDataBase64: z.string().max(16000000).optional(),
+      frontMimeType: walletPhotoMimeSchema.optional(),
+      backPhotoDataBase64: z.string().max(16000000).optional(),
+      backMimeType: walletPhotoMimeSchema.optional(),
+      removeBackPhoto: z.boolean().optional()
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const db = ctx.db();
+      const account = await requireAccount(ctx, args.sessionToken);
+      const existing = (await db.select().from(walletDocuments).where(and(eq(walletDocuments.id, args.id), eq(walletDocuments.accountId, account.id))).limit(1))[0];
+      if (!existing)
+        throw new Error("Document not found.");
+      const ext = (mime) => mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
+      let frontPhotoKey = existing.frontPhotoKey;
+      let frontMimeType = existing.frontMimeType;
+      let backPhotoKey = existing.backPhotoKey;
+      let backMimeType = existing.backMimeType;
+      const newKeys = [];
+      if (args.frontPhotoDataBase64 && args.frontMimeType) {
+        const bytes = Buffer.from(args.frontPhotoDataBase64, "base64");
+        if (bytes.byteLength > 1e7)
+          throw new Error("Each document photo must be under 10 MB.");
+        frontPhotoKey = `wallet-docs/${crypto.randomUUID()}.${ext(args.frontMimeType)}`;
+        frontMimeType = args.frontMimeType;
+        await ctx.blobs.put(frontPhotoKey, bytes, { contentType: args.frontMimeType });
+        newKeys.push(frontPhotoKey);
+      }
+      if (args.backPhotoDataBase64 && args.backMimeType) {
+        const bytes = Buffer.from(args.backPhotoDataBase64, "base64");
+        if (bytes.byteLength > 1e7)
+          throw new Error("Each document photo must be under 10 MB.");
+        backPhotoKey = `wallet-docs/${crypto.randomUUID()}.${ext(args.backMimeType)}`;
+        backMimeType = args.backMimeType;
+        await ctx.blobs.put(backPhotoKey, bytes, { contentType: args.backMimeType });
+        newKeys.push(backPhotoKey);
+      } else if (args.removeBackPhoto) {
+        backPhotoKey = null;
+        backMimeType = null;
+      }
+      try {
+        await db.update(walletDocuments).set({
+          category: args.category,
+          name: args.name.trim(),
+          issuingAuthority: cleanOptional(args.issuingAuthority),
+          issueDate: args.issueDate || null,
+          expiryDate: args.expiryDate || null,
+          notes: cleanOptional(args.notes),
+          frontPhotoKey,
+          frontMimeType,
+          backPhotoKey,
+          backMimeType,
+          updatedAt: new Date
+        }).where(and(eq(walletDocuments.id, args.id), eq(walletDocuments.accountId, account.id)));
+      } catch (error) {
+        await Promise.all(newKeys.map((key) => ctx.blobs.delete(key).catch(() => {
+          return;
+        })));
+        throw error;
+      }
+      if (frontPhotoKey !== existing.frontPhotoKey)
+        await ctx.blobs.delete(existing.frontPhotoKey).catch(() => {
+          return;
+        });
+      if (existing.backPhotoKey && backPhotoKey !== existing.backPhotoKey)
+        await ctx.blobs.delete(existing.backPhotoKey).catch(() => {
+          return;
+        });
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
+  deleteWalletDocument: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, id: z.number().int().positive() }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const db = ctx.db();
+      const account = await requireAccount(ctx, args.sessionToken);
+      const row = (await db.select().from(walletDocuments).where(and(eq(walletDocuments.id, args.id), eq(walletDocuments.accountId, account.id))).limit(1))[0];
+      if (!row)
+        throw new Error("Document not found.");
+      await db.delete(walletDocuments).where(and(eq(walletDocuments.id, args.id), eq(walletDocuments.accountId, account.id)));
+      await ctx.blobs.delete(row.frontPhotoKey).catch(() => {
+        return;
+      });
+      if (row.backPhotoKey)
+        await ctx.blobs.delete(row.backPhotoKey).catch(() => {
+          return;
+        });
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
   getIftaReport: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, year: z.number().int().min(2020).max(2100), quarter: z.number().int().min(1).max(4) }),
     response: z.object({ rows: z.array(z.object({ stateCode: z.string(), miles: z.number(), gallons: z.number() })), totalMiles: z.number(), totalGallons: z.number(), unassignedMiles: z.number(), company: companyProfileSchema }),
@@ -3649,7 +3864,7 @@ var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql", "010_yard_post_photos.sql", "011_profile_image.sql", "012_yard_moderation_logs.sql", "013_hazmat_truck_brand.sql", "014_custom_app_background.sql", "015_add_account_language.sql"];
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql", "010_yard_post_photos.sql", "011_profile_image.sql", "012_yard_moderation_logs.sql", "013_hazmat_truck_brand.sql", "014_custom_app_background.sql", "015_add_account_language.sql", "016_add_wallet_documents.sql"];
 var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
