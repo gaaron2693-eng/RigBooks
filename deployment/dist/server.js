@@ -1339,7 +1339,7 @@ var Actions = {
       imageDataBase64: z.string().max(8000000),
       imageMimeType: z.enum(["image/jpeg", "image/png", "image/webp"])
     }),
-    response: z.object({ ok: z.literal(true) }),
+    response: z.object({ ok: z.literal(true), profileImageUrl: z.string().nullable() }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
       const bytes = Buffer.from(args.imageDataBase64, "base64");
@@ -1354,7 +1354,8 @@ var Actions = {
           return;
         });
       ctx.invalidateQueries();
-      return { ok: true };
+      const profileImageUrl = await ctx.blobs.getUrl(nextKey, { expiresInSeconds: 3600 }).catch(() => null);
+      return { ok: true, profileImageUrl };
     }
   }),
   removeProfileImage: defineAction({
