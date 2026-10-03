@@ -152,6 +152,17 @@ const truckingNewsItemSchema = z.object({
 
 const documentCategorySchema = z.enum(["bol", "insurance", "registration", "other"]);
 const invoiceStatusSchema = z.enum(["draft", "sent", "paid"]);
+const detentionStatusSchema = z.enum(["active", "pending", "sent", "paid"]);
+const detentionClaimSchema = z.object({
+  id: z.number(), facilityType: z.enum(["shipper", "receiver"]), facilityName: z.string(),
+  brokerName: z.string().nullable(), brokerEmail: z.string().nullable(), loadReference: z.string().nullable(),
+  freeMinutes: z.number(), hourlyRate: z.number(), arrivalAt: z.string(),
+  arrivalLat: z.number(), arrivalLng: z.number(), arrivalAccuracyMeters: z.number().nullable(),
+  departureAt: z.string().nullable(), departureLat: z.number().nullable(), departureLng: z.number().nullable(),
+  departureAccuracyMeters: z.number().nullable(), status: detentionStatusSchema,
+  totalWaitMinutes: z.number(), billableMinutes: z.number(), billableHours: z.number(), amountOwed: z.number(),
+  createdAt: z.string(),
+});
 const companyProfileSchema = z.object({
   companyName: z.string(), address: z.string().nullable(), phone: z.string().nullable(),
   email: z.string().nullable(), ein: z.string().nullable(), mcNumber: z.string().nullable(),
@@ -401,6 +412,39 @@ function toLoad(row: typeof schema.loads.$inferSelect): z.infer<typeof loadSchem
     payPercent: row.payPercentBasisPoints == null ? null : row.payPercentBasisPoints / 100,
     perMileRate: row.perMileRateCents == null ? null : row.perMileRateCents / 100,
     notes: row.notes,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+function toDetentionClaim(
+  row: typeof schema.detentionClaims.$inferSelect,
+  now = new Date(),
+): z.infer<typeof detentionClaimSchema> {
+  const end = row.departureAt ?? now;
+  const totalWaitMinutes = Math.max(0, Math.floor((end.getTime() - row.arrivalAt.getTime()) / 60_000));
+  const billableMinutes = Math.max(0, totalWaitMinutes - row.freeMinutes);
+  return {
+    id: row.id,
+    facilityType: row.facilityType,
+    facilityName: row.facilityName,
+    brokerName: row.brokerName,
+    brokerEmail: row.brokerEmail,
+    loadReference: row.loadReference,
+    freeMinutes: row.freeMinutes,
+    hourlyRate: row.hourlyRateCents / 100,
+    arrivalAt: row.arrivalAt.toISOString(),
+    arrivalLat: row.arrivalLatE6 / 1_000_000,
+    arrivalLng: row.arrivalLngE6 / 1_000_000,
+    arrivalAccuracyMeters: row.arrivalAccuracyMeters,
+    departureAt: row.departureAt?.toISOString() ?? null,
+    departureLat: row.departureLatE6 == null ? null : row.departureLatE6 / 1_000_000,
+    departureLng: row.departureLngE6 == null ? null : row.departureLngE6 / 1_000_000,
+    departureAccuracyMeters: row.departureAccuracyMeters,
+    status: row.status,
+    totalWaitMinutes,
+    billableMinutes,
+    billableHours: billableMinutes / 60,
+    amountOwed: Math.round(billableMinutes * row.hourlyRateCents / 60) / 100,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -1699,6 +1743,117 @@ export const Actions = {
       await ctx.db<typeof schema>().insert(schema.iftaEntries).values({ accountId: account.id, stateCode, milesTenths: Math.round(args.miles * 10), gallonsThousandths: 0, source: "gps", entryDate: args.entryDate });
       ctx.invalidateQueries();
       return { stateCode };
+    },
+  }),
+
+  startDetentionClaim: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      facilityType: z.enum(["shipper", "receiver"]),
+      facilityName: z.string().trim().min(2).max(160),
+      brokerName: z.string().trim().max(160).optional(),
+      brokerEmail: z.string().trim().email().max(160).optional().or(z.literal("")),
+      loadReference: z.string().trim().max(100).optional(),
+      freeMinutes: z.number().int().min(0).max(1440).default(120),
+      hourlyRate: z.number().finite().positive().max(10000),
+      lat: z.number().min(-90).max(90),
+      lng: z.number().min(-180).max(180),
+      accuracyMeters: z.number().finite().min(0).max(100000).optional(),
+    }),
+    response: z.object({ id: z.number(), arrivalAt: z.string() }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const account = await requireAccount(ctx, args.sessionToken);
+      const existing = (await db.select({ id: schema.detentionClaims.id }).from(schema.detentionClaims).where(and(eq(schema.detentionClaims.accountId, account.id), eq(schema.detentionClaims.status, "active"))).limit(1))[0];
+      if (existing) throw new Error("Finish your current detention stop before starting another one.");
+      const arrivalAt = new Date();
+      const rows = await db.insert(schema.detentionClaims).values({
+        accountId: account.id,
+        facilityType: args.facilityType,
+        facilityName: args.facilityName.trim(),
+        brokerName: cleanOptional(args.brokerName),
+        brokerEmail: cleanOptional(args.brokerEmail),
+        loadReference: cleanOptional(args.loadReference),
+        freeMinutes: args.freeMinutes,
+        hourlyRateCents: Math.round(args.hourlyRate * 100),
+        arrivalAt,
+        arrivalLatE6: Math.round(args.lat * 1_000_000),
+        arrivalLngE6: Math.round(args.lng * 1_000_000),
+        arrivalAccuracyMeters: args.accuracyMeters == null ? null : Math.round(args.accuracyMeters),
+        status: "active",
+        updatedAt: arrivalAt,
+      }).returning({ id: schema.detentionClaims.id });
+      const row = rows[0];
+      if (!row) throw new Error("Could not start the detention clock.");
+      ctx.invalidateQueries();
+      return { id: row.id, arrivalAt: arrivalAt.toISOString() };
+    },
+  }),
+
+  finishDetentionClaim: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      id: z.number().int().positive(),
+      lat: z.number().min(-90).max(90),
+      lng: z.number().min(-180).max(180),
+      accuracyMeters: z.number().finite().min(0).max(100000).optional(),
+    }),
+    response: detentionClaimSchema,
+    async handler(ctx, args): Promise<z.infer<typeof detentionClaimSchema>> {
+      const db = ctx.db<typeof schema>();
+      const account = await requireAccount(ctx, args.sessionToken);
+      const row = (await db.select().from(schema.detentionClaims).where(and(eq(schema.detentionClaims.id, args.id), eq(schema.detentionClaims.accountId, account.id))).limit(1))[0];
+      if (!row) throw new Error("Detention stop not found.");
+      if (row.status !== "active" || row.departureAt) throw new Error("That detention clock has already stopped.");
+      const departureAt = new Date();
+      await db.update(schema.detentionClaims).set({
+        departureAt,
+        departureLatE6: Math.round(args.lat * 1_000_000),
+        departureLngE6: Math.round(args.lng * 1_000_000),
+        departureAccuracyMeters: args.accuracyMeters == null ? null : Math.round(args.accuracyMeters),
+        status: "pending",
+        updatedAt: departureAt,
+      }).where(and(eq(schema.detentionClaims.id, args.id), eq(schema.detentionClaims.accountId, account.id)));
+      ctx.invalidateQueries();
+      return toDetentionClaim({ ...row, departureAt, departureLatE6: Math.round(args.lat * 1_000_000), departureLngE6: Math.round(args.lng * 1_000_000), departureAccuracyMeters: args.accuracyMeters == null ? null : Math.round(args.accuracyMeters), status: "pending", updatedAt: departureAt }, departureAt);
+    },
+  }),
+
+  listDetentionClaims: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ claims: z.array(detentionClaimSchema), company: companyProfileSchema }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const rows = await ctx.db<typeof schema>().select().from(schema.detentionClaims).where(eq(schema.detentionClaims.accountId, account.id)).orderBy(desc(schema.detentionClaims.createdAt));
+      const company = await loadCompanyProfile(ctx, args.sessionToken);
+      const now = new Date();
+      return { claims: rows.map((row) => toDetentionClaim(row, now)), company };
+    },
+  }),
+
+  markDetentionStatus: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, id: z.number().int().positive(), status: z.enum(["pending", "sent", "paid"]) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const db = ctx.db<typeof schema>();
+      const account = await requireAccount(ctx, args.sessionToken);
+      const row = (await db.select({ departureAt: schema.detentionClaims.departureAt }).from(schema.detentionClaims).where(and(eq(schema.detentionClaims.id, args.id), eq(schema.detentionClaims.accountId, account.id))).limit(1))[0];
+      if (!row) throw new Error("Detention claim not found.");
+      if (!row.departureAt) throw new Error("Stamp departure before changing this claim.");
+      await db.update(schema.detentionClaims).set({ status: args.status, updatedAt: new Date() }).where(and(eq(schema.detentionClaims.id, args.id), eq(schema.detentionClaims.accountId, account.id)));
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  deleteDetentionClaim: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, id: z.number().int().positive() }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      await ctx.db<typeof schema>().delete(schema.detentionClaims).where(and(eq(schema.detentionClaims.id, args.id), eq(schema.detentionClaims.accountId, account.id)));
+      ctx.invalidateQueries();
+      return { ok: true };
     },
   }),
 

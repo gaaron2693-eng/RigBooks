@@ -291,3 +291,28 @@ export const stripeSubscriptions = pgTable("stripe_subscriptions", {
   uniqueIndex("stripe_subscriptions_account_id_unique").on(table.accountId),
   uniqueIndex("stripe_subscriptions_stripe_subscription_id_unique").on(table.stripeSubscriptionId),
 ]);
+
+export const detentionClaims = pgTable("detention_claims", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  facilityType: text("facility_type", { enum: ["shipper", "receiver"] }).notNull(),
+  facilityName: text("facility_name").notNull(),
+  brokerName: text("broker_name"),
+  brokerEmail: text("broker_email"),
+  loadReference: text("load_reference"),
+  freeMinutes: integer("free_minutes").notNull().default(120),
+  hourlyRateCents: integer("hourly_rate_cents").notNull(),
+  arrivalAt: timestamp("arrival_at", { mode: "date", withTimezone: true }).notNull(),
+  arrivalLatE6: integer("arrival_lat_e6").notNull(),
+  arrivalLngE6: integer("arrival_lng_e6").notNull(),
+  arrivalAccuracyMeters: integer("arrival_accuracy_meters"),
+  departureAt: timestamp("departure_at", { mode: "date", withTimezone: true }),
+  departureLatE6: integer("departure_lat_e6"),
+  departureLngE6: integer("departure_lng_e6"),
+  departureAccuracyMeters: integer("departure_accuracy_meters"),
+  status: text("status", { enum: ["active", "pending", "sent", "paid"] }).notNull().default("active"),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [
+  index("detention_claims_account_created_idx").on(table.accountId, table.createdAt),
+]);
