@@ -221,14 +221,14 @@ async function requireAccount(ctx: Ctx, sessionToken: string): Promise<typeof sc
 
 // Stripe test-mode plans. These are TEST price ids — swap for live price ids at go-live.
 const stripeTestPriceByPlan = {
-  weekly: "price_1UKtygLTe9osv09oYHxPoJys",
-  monthly: "price_1UKtyhLTe9osv09owS82qxkq",
-  yearly: "price_1UKtyiLTe9osv09oFHCbM89H",
+  weekly: "price_1UMGyPLA9b278vpHi1GBC7m9",
+  monthly: "price_1UMGyPLA9b278vpH48MWbxmT",
+  yearly: "price_1UMGyQLA9b278vpHMo3Q2tUV",
 } as const;
 const stripeTestPlanByPrice: Record<string, "weekly" | "monthly" | "yearly"> = {
-  price_1UKtygLTe9osv09oYHxPoJys: "weekly",
-  price_1UKtyhLTe9osv09owS82qxkq: "monthly",
-  price_1UKtyiLTe9osv09oFHCbM89H: "yearly",
+  price_1UMGyPLA9b278vpHi1GBC7m9: "weekly",
+  price_1UMGyPLA9b278vpH48MWbxmT: "monthly",
+  price_1UMGyQLA9b278vpHMo3Q2tUV: "yearly",
 };
 const planSchema = z.enum(["weekly", "monthly", "yearly"]);
 
