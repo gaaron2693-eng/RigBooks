@@ -211,6 +211,12 @@ var paySettings = pgTable("pay_settings", {
   weeklyMaintenanceEscrowCents: integer("weekly_maintenance_escrow_cents").notNull().default(0),
   weeklyInsuranceCents: integer("weekly_insurance_cents").notNull().default(0),
   weeklyOtherDeductionsCents: integer("weekly_other_deductions_cents").notNull().default(0),
+  fuelCostPerMileCents: integer("fuel_cost_per_mile_cents").notNull().default(0),
+  maintenanceCostPerMileCents: integer("maintenance_cost_per_mile_cents").notNull().default(0),
+  insuranceCostPerMileCents: integer("insurance_cost_per_mile_cents").notNull().default(0),
+  truckCostPerMileCents: integer("truck_cost_per_mile_cents").notNull().default(0),
+  otherCostPerMileCents: integer("other_cost_per_mile_cents").notNull().default(0),
+  factoringFeeBasisPoints: integer("factoring_fee_basis_points").notNull().default(0),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 });
 var workShifts = pgTable("work_shifts", {
@@ -1627,7 +1633,13 @@ var Actions = {
       weeklyTruckPayment: z.number().finite().min(0).max(1e5),
       weeklyMaintenanceEscrow: z.number().finite().min(0).max(1e5),
       weeklyInsurance: z.number().finite().min(0).max(1e5),
-      weeklyOtherDeductions: z.number().finite().min(0).max(1e5)
+      weeklyOtherDeductions: z.number().finite().min(0).max(1e5),
+      fuelCostPerMile: z.number().finite().min(0).max(100),
+      maintenanceCostPerMile: z.number().finite().min(0).max(100),
+      insuranceCostPerMile: z.number().finite().min(0).max(100),
+      truckCostPerMile: z.number().finite().min(0).max(100),
+      otherCostPerMile: z.number().finite().min(0).max(100),
+      factoringFeePercent: z.number().finite().min(0).max(25)
     }),
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args) {
@@ -1649,6 +1661,12 @@ var Actions = {
         weeklyMaintenanceEscrowCents: Math.round(args.weeklyMaintenanceEscrow * 100),
         weeklyInsuranceCents: Math.round(args.weeklyInsurance * 100),
         weeklyOtherDeductionsCents: Math.round(args.weeklyOtherDeductions * 100),
+        fuelCostPerMileCents: Math.round(args.fuelCostPerMile * 100),
+        maintenanceCostPerMileCents: Math.round(args.maintenanceCostPerMile * 100),
+        insuranceCostPerMileCents: Math.round(args.insuranceCostPerMile * 100),
+        truckCostPerMileCents: Math.round(args.truckCostPerMile * 100),
+        otherCostPerMileCents: Math.round(args.otherCostPerMile * 100),
+        factoringFeeBasisPoints: Math.round(args.factoringFeePercent * 100),
         updatedAt: new Date
       };
       if (existing[0]) {
@@ -2995,7 +3013,7 @@ var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql"];
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql"];
 var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
