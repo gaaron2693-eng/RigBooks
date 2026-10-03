@@ -135,6 +135,8 @@ export const truckProfiles = pgTable("truck_profiles", {
   lengthFeet: integer("length_feet").notNull().default(75),
   widthInches: integer("width_inches").notNull().default(102),
   hasPrePass: boolean("has_prepass").notNull().default(false),
+  hazmat: boolean("hazmat").notNull().default(false),
+  truckBrand: text("truck_brand"),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
 }, (table) => [uniqueIndex("truck_profiles_account_id_unique").on(table.accountId)]);
 

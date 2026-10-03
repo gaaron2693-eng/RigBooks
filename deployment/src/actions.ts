@@ -207,10 +207,11 @@ const driverPostSchema = z.object({
   id: z.number(), driverName: z.string(), body: z.string(), createdAt: z.string(), likeCount: z.number(),
   likedByViewer: z.boolean(), replies: z.array(driverReplySchema),
 });
+const truckBrandSchema = z.enum(["international", "peterbilt", "kenworth", "freightliner", "volvo", "mack", "western_star"]);
 const roadRouteSchema = z.object({
   originLabel: z.string(), destinationLabel: z.string(), distanceMiles: z.number(), durationMinutes: z.number(),
   shape: z.array(z.object({ lat: z.number(), lng: z.number() })),
-  maneuvers: z.array(z.object({ instruction: z.string(), distanceMiles: z.number(), timeMinutes: z.number() })),
+  maneuvers: z.array(z.object({ instruction: z.string(), maneuverType: z.number().int(), distanceMiles: z.number(), timeMinutes: z.number() })),
   truckStops: z.array(truckPlaceSchema),
   attribution: z.string(),
 });
@@ -2260,23 +2261,23 @@ export const Actions = {
 
   getTruckProfile: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema,}),
-    response: z.object({ configured: z.boolean(), truckName: z.string(), currentOdometer: z.number(), lastPmOdometer: z.number(), pmInterval: z.number(), nextPmDue: z.number(), milesRemaining: z.number(), status: z.enum(["ok", "soon", "due"]), heightInches: z.number(), weightPounds: z.number(), lengthFeet: z.number(), widthInches: z.number(), hasPrePass: z.boolean() }),
+    response: z.object({ configured: z.boolean(), truckName: z.string(), currentOdometer: z.number(), lastPmOdometer: z.number(), pmInterval: z.number(), nextPmDue: z.number(), milesRemaining: z.number(), status: z.enum(["ok", "soon", "due"]), heightInches: z.number(), weightPounds: z.number(), lengthFeet: z.number(), widthInches: z.number(), hasPrePass: z.boolean(), hazmat: z.boolean(), truckBrand: truckBrandSchema.nullable() }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
       
       const row = (await ctx.db<typeof schema>().select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
-      if (!row) return { configured: false, truckName: "My truck", currentOdometer: 0, lastPmOdometer: 0, pmInterval: 15000, nextPmDue: 15000, milesRemaining: 15000, status: "ok" as const, heightInches: 162, weightPounds: 80000, lengthFeet: 75, widthInches: 102, hasPrePass: false };
+      if (!row) return { configured: false, truckName: "My truck", currentOdometer: 0, lastPmOdometer: 0, pmInterval: 15000, nextPmDue: 15000, milesRemaining: 15000, status: "ok" as const, heightInches: 162, weightPounds: 80000, lengthFeet: 75, widthInches: 102, hasPrePass: false, hazmat: false, truckBrand: null };
       const currentOdometer = row.currentOdometerTenths / 10;
       const lastPmOdometer = row.lastPmOdometerTenths / 10;
       const pmInterval = row.pmIntervalTenths / 10;
       const nextPmDue = lastPmOdometer + pmInterval;
       const milesRemaining = nextPmDue - currentOdometer;
-      return { configured: true, truckName: row.truckName, currentOdometer, lastPmOdometer, pmInterval, nextPmDue, milesRemaining, status: milesRemaining <= 0 ? "due" as const : milesRemaining <= Math.min(1000, pmInterval * 0.1) ? "soon" as const : "ok" as const, heightInches: row.heightInches, weightPounds: row.weightPounds, lengthFeet: row.lengthFeet, widthInches: row.widthInches, hasPrePass: row.hasPrePass };
+      return { configured: true, truckName: row.truckName, currentOdometer, lastPmOdometer, pmInterval, nextPmDue, milesRemaining, status: milesRemaining <= 0 ? "due" as const : milesRemaining <= Math.min(1000, pmInterval * 0.1) ? "soon" as const : "ok" as const, heightInches: row.heightInches, weightPounds: row.weightPounds, lengthFeet: row.lengthFeet, widthInches: row.widthInches, hasPrePass: row.hasPrePass, hazmat: row.hazmat, truckBrand: row.truckBrand };
     },
   }),
 
   saveTruckProfile: defineAction({
-    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), currentOdometer: z.number().finite().min(0).max(10000000), lastPmOdometer: z.number().finite().min(0).max(10000000), pmInterval: z.number().finite().positive().max(1000000), heightInches: z.number().int().min(96).max(180).optional(), weightPounds: z.number().int().min(10000).max(200000).optional(), lengthFeet: z.number().int().min(20).max(150).optional(), widthInches: z.number().int().min(72).max(144).optional(), hasPrePass: z.boolean().optional() }),
+    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), currentOdometer: z.number().finite().min(0).max(10000000), lastPmOdometer: z.number().finite().min(0).max(10000000), pmInterval: z.number().finite().positive().max(1000000), heightInches: z.number().int().min(96).max(180).optional(), weightPounds: z.number().int().min(10000).max(200000).optional(), lengthFeet: z.number().int().min(20).max(150).optional(), widthInches: z.number().int().min(72).max(144).optional(), hasPrePass: z.boolean().optional(), hazmat: z.boolean().optional(), truckBrand: truckBrandSchema.nullable().optional() }),
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args): Promise<{ ok: true }> {
       const account = await requireAccount(ctx, args.sessionToken);
@@ -2284,7 +2285,7 @@ export const Actions = {
       
       const db = ctx.db<typeof schema>();
       const row = (await db.select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
-      const values = { accountId: account.id, truckName: args.truckName.trim(), currentOdometerTenths: Math.round(args.currentOdometer * 10), lastPmOdometerTenths: Math.round(args.lastPmOdometer * 10), pmIntervalTenths: Math.round(args.pmInterval * 10), heightInches: args.heightInches ?? row?.heightInches ?? 162, weightPounds: args.weightPounds ?? row?.weightPounds ?? 80000, lengthFeet: args.lengthFeet ?? row?.lengthFeet ?? 75, widthInches: args.widthInches ?? row?.widthInches ?? 102, hasPrePass: args.hasPrePass ?? row?.hasPrePass ?? false, updatedAt: new Date() };
+      const values = { accountId: account.id, truckName: args.truckName.trim(), currentOdometerTenths: Math.round(args.currentOdometer * 10), lastPmOdometerTenths: Math.round(args.lastPmOdometer * 10), pmIntervalTenths: Math.round(args.pmInterval * 10), heightInches: args.heightInches ?? row?.heightInches ?? 162, weightPounds: args.weightPounds ?? row?.weightPounds ?? 80000, lengthFeet: args.lengthFeet ?? row?.lengthFeet ?? 75, widthInches: args.widthInches ?? row?.widthInches ?? 102, hasPrePass: args.hasPrePass ?? row?.hasPrePass ?? false, hazmat: args.hazmat ?? row?.hazmat ?? false, truckBrand: args.truckBrand === undefined ? row?.truckBrand ?? null : args.truckBrand, updatedAt: new Date() };
       if (row) await db.update(schema.truckProfiles).set(values).where(eq(schema.truckProfiles.id, row.id));
       else await db.insert(schema.truckProfiles).values(values);
       ctx.invalidateQueries();
@@ -2293,12 +2294,12 @@ export const Actions = {
   }),
 
   saveTruckRouteProfile: defineAction({
-    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), heightInches: z.number().int().min(96).max(180), weightPounds: z.number().int().min(10000).max(200000), lengthFeet: z.number().int().min(20).max(150), widthInches: z.number().int().min(72).max(144), hasPrePass: z.boolean() }),
+    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), heightInches: z.number().int().min(96).max(180), weightPounds: z.number().int().min(10000).max(200000), lengthFeet: z.number().int().min(20).max(150), widthInches: z.number().int().min(72).max(144), hasPrePass: z.boolean(), hazmat: z.boolean(), truckBrand: truckBrandSchema.nullable() }),
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args): Promise<{ ok: true }> {
       const account = await requireAccount(ctx, args.sessionToken);  const db = ctx.db<typeof schema>();
       const row = (await db.select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
-      const values = { accountId: account.id, truckName: args.truckName.trim(), heightInches: args.heightInches, weightPounds: args.weightPounds, lengthFeet: args.lengthFeet, widthInches: args.widthInches, hasPrePass: args.hasPrePass, currentOdometerTenths: row?.currentOdometerTenths ?? 0, lastPmOdometerTenths: row?.lastPmOdometerTenths ?? 0, pmIntervalTenths: row?.pmIntervalTenths ?? 150000, updatedAt: new Date() };
+      const values = { accountId: account.id, truckName: args.truckName.trim(), heightInches: args.heightInches, weightPounds: args.weightPounds, lengthFeet: args.lengthFeet, widthInches: args.widthInches, hasPrePass: args.hasPrePass, hazmat: args.hazmat, truckBrand: args.truckBrand, currentOdometerTenths: row?.currentOdometerTenths ?? 0, lastPmOdometerTenths: row?.lastPmOdometerTenths ?? 0, pmIntervalTenths: row?.pmIntervalTenths ?? 150000, updatedAt: new Date() };
       if (row) await db.update(schema.truckProfiles).set(values).where(eq(schema.truckProfiles.id, row.id)); else await db.insert(schema.truckProfiles).values(values);
       ctx.invalidateQueries(); return { ok: true };
     },
@@ -2332,7 +2333,7 @@ export const Actions = {
         return { lat, lng, label: row?.display_name ?? query };
       };
       const [origin, destination] = await Promise.all([geocode(args.origin), geocode(args.destination)]);
-      const routeResponse = await fetch("https://valhalla1.openstreetmap.de/route", { method: "POST", headers: { "Content-Type": "application/json", "X-Client-Id": "rigrevenue", "User-Agent": "RigRevenue/1.0" }, body: JSON.stringify({ locations: [{ lat: origin.lat, lon: origin.lng }, { lat: destination.lat, lon: destination.lng }], costing: "truck", costing_options: { truck: { height: truck.heightInches * 0.0254, width: truck.widthInches * 0.0254, length: truck.lengthFeet * 0.3048, weight: truck.weightPounds * 0.000453592, axle_load: Math.min(20, truck.weightPounds * 0.000453592 / 5), hazmat: false } }, units: "miles", language: "en-US" }) });
+      const routeResponse = await fetch("https://valhalla1.openstreetmap.de/route", { method: "POST", headers: { "Content-Type": "application/json", "X-Client-Id": "rigrevenue", "User-Agent": "RigRevenue/1.0" }, body: JSON.stringify({ locations: [{ lat: origin.lat, lon: origin.lng }, { lat: destination.lat, lon: destination.lng }], costing: "truck", costing_options: { truck: { height: truck.heightInches * 0.0254, width: truck.widthInches * 0.0254, length: truck.lengthFeet * 0.3048, weight: truck.weightPounds * 0.000453592, axle_load: Math.min(20, truck.weightPounds * 0.000453592 / 5), hazmat: truck.hazmat ?? false } }, units: "miles", language: "en-US" }) });
       if (!routeResponse.ok) throw new Error("A truck-safe route could not be calculated right now.");
       const routeData = await routeResponse.json() as { trip?: { summary?: { length?: number; time?: number }; legs?: Array<{ shape?: string; maneuvers?: Array<{ instruction?: string; length?: number; time?: number }> }> } };
       const leg = routeData.trip?.legs?.[0]; const summary = routeData.trip?.summary;
@@ -2351,7 +2352,7 @@ export const Actions = {
         const address = [tags["addr:housenumber"], tags["addr:street"], tags["addr:city"], tags["addr:state"]].filter(Boolean).join(" ") || null;
         return [{ id: `${element.type ?? "node"}-${element.id ?? `${lat}-${lng}`}`, name: tags.name || tags.brand || (isCat ? "CAT Scale" : "Truck stop"), category, address, lat, lng, distanceMiles: Math.round(nearest * 10) / 10 }];
       }).sort((a, b) => a.distanceMiles - b.distanceMiles).slice(0, 12);
-      return { originLabel: origin.label, destinationLabel: destination.label, distanceMiles: Math.round(summary.length * 10) / 10, durationMinutes: Math.round(summary.time / 60), shape, maneuvers: (leg.maneuvers ?? []).map((item) => ({ instruction: item.instruction ?? "Continue", distanceMiles: Math.round((item.length ?? 0) * 10) / 10, timeMinutes: Math.max(1, Math.round((item.time ?? 0) / 60)) })), truckStops, attribution: "Route and place data © OpenStreetMap contributors" };
+      return { originLabel: origin.label, destinationLabel: destination.label, distanceMiles: Math.round(summary.length * 10) / 10, durationMinutes: Math.round(summary.time / 60), shape, maneuvers: (leg.maneuvers ?? []).map((item) => ({ instruction: item.instruction ?? "Continue", maneuverType: Number.isFinite(item.type) ? Math.trunc(item.type ?? 0) : 0, distanceMiles: Math.round((item.length ?? 0) * 10) / 10, timeMinutes: Math.max(1, Math.round((item.time ?? 0) / 60)) })), truckStops, attribution: "Route and place data © OpenStreetMap contributors" };
     },
   }),
 
