@@ -39,6 +39,7 @@ __export(exports_schema, {
   accounts: () => accounts,
   compInvites: () => compInvites,
   companyProfile: () => companyProfile,
+  detentionClaims: () => detentionClaims,
   documents: () => documents,
   driverPostLikes: () => driverPostLikes,
   driverPosts: () => driverPosts,
@@ -314,6 +315,30 @@ var stripeSubscriptions = pgTable("stripe_subscriptions", {
   uniqueIndex("stripe_subscriptions_account_id_unique").on(table.accountId),
   uniqueIndex("stripe_subscriptions_stripe_subscription_id_unique").on(table.stripeSubscriptionId)
 ]);
+var detentionClaims = pgTable("detention_claims", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  facilityType: text("facility_type", { enum: ["shipper", "receiver"] }).notNull(),
+  facilityName: text("facility_name").notNull(),
+  brokerName: text("broker_name"),
+  brokerEmail: text("broker_email"),
+  loadReference: text("load_reference"),
+  freeMinutes: integer("free_minutes").notNull().default(120),
+  hourlyRateCents: integer("hourly_rate_cents").notNull(),
+  arrivalAt: timestamp("arrival_at", { mode: "date", withTimezone: true }).notNull(),
+  arrivalLatE6: integer("arrival_lat_e6").notNull(),
+  arrivalLngE6: integer("arrival_lng_e6").notNull(),
+  arrivalAccuracyMeters: integer("arrival_accuracy_meters"),
+  departureAt: timestamp("departure_at", { mode: "date", withTimezone: true }),
+  departureLatE6: integer("departure_lat_e6"),
+  departureLngE6: integer("departure_lng_e6"),
+  departureAccuracyMeters: integer("departure_accuracy_meters"),
+  status: text("status", { enum: ["active", "pending", "sent", "paid"] }).notNull().default("active"),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [
+  index("detention_claims_account_created_idx").on(table.accountId, table.createdAt)
+]);
 
 // src/actions.ts
 var driverTypeSchema = z.enum(["company_driver", "lease_purchase", "owner_operator", "hourly_driver"]);
@@ -468,6 +493,31 @@ var truckingNewsItemSchema = z.object({
 });
 var documentCategorySchema = z.enum(["bol", "insurance", "registration", "other"]);
 var invoiceStatusSchema = z.enum(["draft", "sent", "paid"]);
+var detentionStatusSchema = z.enum(["active", "pending", "sent", "paid"]);
+var detentionClaimSchema = z.object({
+  id: z.number(),
+  facilityType: z.enum(["shipper", "receiver"]),
+  facilityName: z.string(),
+  brokerName: z.string().nullable(),
+  brokerEmail: z.string().nullable(),
+  loadReference: z.string().nullable(),
+  freeMinutes: z.number(),
+  hourlyRate: z.number(),
+  arrivalAt: z.string(),
+  arrivalLat: z.number(),
+  arrivalLng: z.number(),
+  arrivalAccuracyMeters: z.number().nullable(),
+  departureAt: z.string().nullable(),
+  departureLat: z.number().nullable(),
+  departureLng: z.number().nullable(),
+  departureAccuracyMeters: z.number().nullable(),
+  status: detentionStatusSchema,
+  totalWaitMinutes: z.number(),
+  billableMinutes: z.number(),
+  billableHours: z.number(),
+  amountOwed: z.number(),
+  createdAt: z.string()
+});
 var companyProfileSchema = z.object({
   companyName: z.string(),
   address: z.string().nullable(),
@@ -736,6 +786,35 @@ function toLoad(row) {
     payPercent: row.payPercentBasisPoints == null ? null : row.payPercentBasisPoints / 100,
     perMileRate: row.perMileRateCents == null ? null : row.perMileRateCents / 100,
     notes: row.notes,
+    createdAt: row.createdAt.toISOString()
+  };
+}
+function toDetentionClaim(row, now = new Date) {
+  const end = row.departureAt ?? now;
+  const totalWaitMinutes = Math.max(0, Math.floor((end.getTime() - row.arrivalAt.getTime()) / 60000));
+  const billableMinutes = Math.max(0, totalWaitMinutes - row.freeMinutes);
+  return {
+    id: row.id,
+    facilityType: row.facilityType,
+    facilityName: row.facilityName,
+    brokerName: row.brokerName,
+    brokerEmail: row.brokerEmail,
+    loadReference: row.loadReference,
+    freeMinutes: row.freeMinutes,
+    hourlyRate: row.hourlyRateCents / 100,
+    arrivalAt: row.arrivalAt.toISOString(),
+    arrivalLat: row.arrivalLatE6 / 1e6,
+    arrivalLng: row.arrivalLngE6 / 1e6,
+    arrivalAccuracyMeters: row.arrivalAccuracyMeters,
+    departureAt: row.departureAt?.toISOString() ?? null,
+    departureLat: row.departureLatE6 == null ? null : row.departureLatE6 / 1e6,
+    departureLng: row.departureLngE6 == null ? null : row.departureLngE6 / 1e6,
+    departureAccuracyMeters: row.departureAccuracyMeters,
+    status: row.status,
+    totalWaitMinutes,
+    billableMinutes,
+    billableHours: billableMinutes / 60,
+    amountOwed: Math.round(billableMinutes * row.hourlyRateCents / 60) / 100,
     createdAt: row.createdAt.toISOString()
   };
 }
@@ -2056,6 +2135,118 @@ var Actions = {
       return { stateCode };
     }
   }),
+  startDetentionClaim: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      facilityType: z.enum(["shipper", "receiver"]),
+      facilityName: z.string().trim().min(2).max(160),
+      brokerName: z.string().trim().max(160).optional(),
+      brokerEmail: z.string().trim().email().max(160).optional().or(z.literal("")),
+      loadReference: z.string().trim().max(100).optional(),
+      freeMinutes: z.number().int().min(0).max(1440).default(120),
+      hourlyRate: z.number().finite().positive().max(1e4),
+      lat: z.number().min(-90).max(90),
+      lng: z.number().min(-180).max(180),
+      accuracyMeters: z.number().finite().min(0).max(1e5).optional()
+    }),
+    response: z.object({ id: z.number(), arrivalAt: z.string() }),
+    async handler(ctx, args) {
+      const db = ctx.db();
+      const account = await requireAccount(ctx, args.sessionToken);
+      const existing = (await db.select({ id: detentionClaims.id }).from(detentionClaims).where(and(eq(detentionClaims.accountId, account.id), eq(detentionClaims.status, "active"))).limit(1))[0];
+      if (existing)
+        throw new Error("Finish your current detention stop before starting another one.");
+      const arrivalAt = new Date;
+      const rows = await db.insert(detentionClaims).values({
+        accountId: account.id,
+        facilityType: args.facilityType,
+        facilityName: args.facilityName.trim(),
+        brokerName: cleanOptional(args.brokerName),
+        brokerEmail: cleanOptional(args.brokerEmail),
+        loadReference: cleanOptional(args.loadReference),
+        freeMinutes: args.freeMinutes,
+        hourlyRateCents: Math.round(args.hourlyRate * 100),
+        arrivalAt,
+        arrivalLatE6: Math.round(args.lat * 1e6),
+        arrivalLngE6: Math.round(args.lng * 1e6),
+        arrivalAccuracyMeters: args.accuracyMeters == null ? null : Math.round(args.accuracyMeters),
+        status: "active",
+        updatedAt: arrivalAt
+      }).returning({ id: detentionClaims.id });
+      const row = rows[0];
+      if (!row)
+        throw new Error("Could not start the detention clock.");
+      ctx.invalidateQueries();
+      return { id: row.id, arrivalAt: arrivalAt.toISOString() };
+    }
+  }),
+  finishDetentionClaim: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      id: z.number().int().positive(),
+      lat: z.number().min(-90).max(90),
+      lng: z.number().min(-180).max(180),
+      accuracyMeters: z.number().finite().min(0).max(1e5).optional()
+    }),
+    response: detentionClaimSchema,
+    async handler(ctx, args) {
+      const db = ctx.db();
+      const account = await requireAccount(ctx, args.sessionToken);
+      const row = (await db.select().from(detentionClaims).where(and(eq(detentionClaims.id, args.id), eq(detentionClaims.accountId, account.id))).limit(1))[0];
+      if (!row)
+        throw new Error("Detention stop not found.");
+      if (row.status !== "active" || row.departureAt)
+        throw new Error("That detention clock has already stopped.");
+      const departureAt = new Date;
+      await db.update(detentionClaims).set({
+        departureAt,
+        departureLatE6: Math.round(args.lat * 1e6),
+        departureLngE6: Math.round(args.lng * 1e6),
+        departureAccuracyMeters: args.accuracyMeters == null ? null : Math.round(args.accuracyMeters),
+        status: "pending",
+        updatedAt: departureAt
+      }).where(and(eq(detentionClaims.id, args.id), eq(detentionClaims.accountId, account.id)));
+      ctx.invalidateQueries();
+      return toDetentionClaim({ ...row, departureAt, departureLatE6: Math.round(args.lat * 1e6), departureLngE6: Math.round(args.lng * 1e6), departureAccuracyMeters: args.accuracyMeters == null ? null : Math.round(args.accuracyMeters), status: "pending", updatedAt: departureAt }, departureAt);
+    }
+  }),
+  listDetentionClaims: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ claims: z.array(detentionClaimSchema), company: companyProfileSchema }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const rows = await ctx.db().select().from(detentionClaims).where(eq(detentionClaims.accountId, account.id)).orderBy(desc(detentionClaims.createdAt));
+      const company = await loadCompanyProfile(ctx, args.sessionToken);
+      const now = new Date;
+      return { claims: rows.map((row) => toDetentionClaim(row, now)), company };
+    }
+  }),
+  markDetentionStatus: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, id: z.number().int().positive(), status: z.enum(["pending", "sent", "paid"]) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const db = ctx.db();
+      const account = await requireAccount(ctx, args.sessionToken);
+      const row = (await db.select({ departureAt: detentionClaims.departureAt }).from(detentionClaims).where(and(eq(detentionClaims.id, args.id), eq(detentionClaims.accountId, account.id))).limit(1))[0];
+      if (!row)
+        throw new Error("Detention claim not found.");
+      if (!row.departureAt)
+        throw new Error("Stamp departure before changing this claim.");
+      await db.update(detentionClaims).set({ status: args.status, updatedAt: new Date }).where(and(eq(detentionClaims.id, args.id), eq(detentionClaims.accountId, account.id)));
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
+  deleteDetentionClaim: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, id: z.number().int().positive() }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      await ctx.db().delete(detentionClaims).where(and(eq(detentionClaims.id, args.id), eq(detentionClaims.accountId, account.id)));
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
   createInvoice: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, loadId: z.number().int().positive(), recipientEmail: z.string().email().optional().or(z.literal("")), dueDays: z.number().int().min(0).max(120).default(30), notes: z.string().max(500).optional() }),
     response: z.object({ id: z.number() }),
@@ -2804,7 +2995,7 @@ var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql"];
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql"];
 var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
