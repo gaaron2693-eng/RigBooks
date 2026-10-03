@@ -17,9 +17,9 @@ const stripeSecretKey = process.env.STRIPE_SECRET_KEY?.trim() || null;
 const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim() || null;
 // TEST MODE Stripe price ids -> plan. Swap for live price ids at go-live.
 const stripeTestPlans: Record<string, "weekly" | "monthly" | "yearly"> = {
-  price_1UKtygLTe9osv09oYHxPoJys: "weekly",
-  price_1UKtyhLTe9osv09owS82qxkq: "monthly",
-  price_1UKtyiLTe9osv09oFHCbM89H: "yearly",
+  price_1UMGyPLA9b278vpHi1GBC7m9: "weekly",
+  price_1UMGyPLA9b278vpH48MWbxmT: "monthly",
+  price_1UMGyQLA9b278vpHMo3Q2tUV: "yearly",
 };
 const port = Number(process.env.PORT || 3000);
 const maxUploadBytes = Number(process.env.MAX_UPLOAD_BYTES || 18_000_000);
