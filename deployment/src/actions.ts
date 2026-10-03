@@ -196,11 +196,33 @@ const companyProfileSchema = z.object({
   email: z.string().nullable(), ein: z.string().nullable(), mcNumber: z.string().nullable(),
   dotNumber: z.string().nullable(), logoUrl: z.string().nullable(),
 });
+const translationCache = new Map<string, { text: string; sourceLang: string | null }>();
+
+async function openAiChat(messages: Array<{ role: string; content: string }>, maxTokens: number, temperature: number, jsonMode = false): Promise<{ available: boolean; text: string | null }> {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key || !key.startsWith("sk-")) return { available: false, text: null };
+  try {
+    const body: Record<string, unknown> = { model: "gpt-4o-mini", messages, max_tokens: maxTokens, temperature };
+    if (jsonMode) body.response_format = { type: "json_object" };
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) return { available: false, text: null };
+    const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+    const text = data.choices?.[0]?.message?.content?.trim() ?? null;
+    return { available: !!text, text };
+  } catch {
+    return { available: false, text: null };
+  }
+}
+
 const accountSchema = z.object({
   id: z.number(), displayName: z.string(), email: z.string().nullable(), authProvider: authProviderSchema,
   role: accessRoleSchema, accessLabel: z.string().nullable(), profileImageUrl: z.string().nullable(),
   backgroundImageUrl: z.string().nullable(), backgroundOpacity: z.number().int().min(5).max(30),
-  createdAt: z.string(),
+  language: z.enum(["en", "es"]), createdAt: z.string(),
 });
 const driverReplySchema = z.object({
   id: z.number(), postId: z.number(), driverName: z.string(), body: z.string(), createdAt: z.string(),
@@ -779,7 +801,7 @@ export const Actions = {
       return {
         authenticated: Boolean(account),
         suggestedName: viewerDisplayName(viewer),
-        account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() } : null,
+        account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, language: account.language ?? "en", createdAt: account.createdAt.toISOString() } : null,
         legacyRole: inheritedRole,
         sessionToken: activeToken,
       };
@@ -823,7 +845,7 @@ export const Actions = {
       const sessionToken = await issueSession(ctx, account.id);
       if (role === "creator") await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
-      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() }, sessionToken };
+      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, language: account.language ?? "en", createdAt: account.createdAt.toISOString() }, sessionToken };
     },
   }),
 
@@ -839,7 +861,7 @@ export const Actions = {
       if (!safeEqualHex(account.passwordHash, suppliedHash)) throw new Error("Email or password is incorrect.");
       const sessionToken = await issueSession(ctx, account.id);
       ctx.invalidateQueries();
-      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() }, sessionToken };
+      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, language: account.language ?? "en", createdAt: account.createdAt.toISOString() }, sessionToken };
     },
   }),
 
@@ -906,7 +928,7 @@ export const Actions = {
       const db = ctx.db<typeof schema>();
       const viewerId = viewerIdentity(viewer);
       const existing = (await db.select().from(schema.accounts).where(eq(schema.accounts.viewerFbid, viewerId)).limit(1))[0];
-      if (existing) return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, profileImageUrl: existing.profileImageBlobKey ? await ctx.blobs.getUrl(existing.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: existing.backgroundImageBlobKey ? await ctx.blobs.getUrl(existing.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: existing.backgroundOpacity, createdAt: existing.createdAt.toISOString() };
+      if (existing) return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, profileImageUrl: existing.profileImageBlobKey ? await ctx.blobs.getUrl(existing.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: existing.backgroundImageBlobKey ? await ctx.blobs.getUrl(existing.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: existing.backgroundOpacity, language: existing.language ?? "en", createdAt: existing.createdAt.toISOString() };
       const legacy = (await db.select().from(schema.subscriptionAccess).where(eq(schema.subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role: z.infer<typeof accessRoleSchema> = viewer.isOwner ? "creator" : (legacy?.role ?? "standard");
       const accessLabel = viewer.isOwner ? "RigRevenue creator" : (legacy?.label ?? null);
@@ -922,7 +944,7 @@ export const Actions = {
       if (!account) throw new Error("Could not create your RigRevenue account.");
       if (role === "creator") await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
-      return { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() };
+      return { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, language: account.language ?? "en", createdAt: account.createdAt.toISOString() };
     },
   }),
 
@@ -933,6 +955,16 @@ export const Actions = {
       const account = await requireAccount(ctx, args.sessionToken);
       await ctx.db<typeof schema>().update(schema.accounts).set({ displayName: args.displayName.trim(), email: args.email.trim().toLowerCase(), updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
       ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  setLanguage: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, language: z.enum(["en", "es"]) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      await ctx.db<typeof schema>().update(schema.accounts).set({ language: args.language, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
       return { ok: true };
     },
   }),
@@ -2226,6 +2258,50 @@ export const Actions = {
     },
   }),
 
+  translateYardPost: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, postId: z.number().int().optional(), replyId: z.number().int().optional(), targetLang: z.enum(["en", "es"]).default("en") }),
+    response: z.object({ available: z.boolean(), translatedText: z.string().nullable(), sourceLang: z.string().nullable() }),
+    async handler(ctx, args) {
+      await requireAccount(ctx, args.sessionToken);
+      const hasPost = args.postId != null; const hasReply = args.replyId != null;
+      if (hasPost === hasReply) throw new Error("Pick a post or a reply to translate.");
+      const db = ctx.db<typeof schema>();
+      let body: string | null = null;
+      const cacheKey = hasPost ? `post:${args.postId}:${args.targetLang}` : `reply:${args.replyId}:${args.targetLang}`;
+      if (hasPost) {
+        body = (await db.select({ body: schema.driverPosts.body }).from(schema.driverPosts).where(eq(schema.driverPosts.id, args.postId as number)).limit(1))[0]?.body ?? null;
+      } else {
+        body = (await db.select({ body: schema.driverReplies.body }).from(schema.driverReplies).where(eq(schema.driverReplies.id, args.replyId as number)).limit(1))[0]?.body ?? null;
+      }
+      if (!body?.trim()) throw new Error("There's nothing to translate here.");
+      const cached = translationCache.get(cacheKey);
+      if (cached) return { available: true, translatedText: cached.text, sourceLang: cached.sourceLang };
+      const targetName = args.targetLang === "es" ? "Spanish" : "English";
+      try {
+        const result = await openAiChat([
+          { role: "system", content: `Translate the user's text to ${targetName}. Detect the source language. If the text is already in ${targetName}, return it unchanged. Keep trucker slang natural. Reply with JSON only: {"translation": "...", "sourceLang": "<iso code like en, es, fr>"}.` },
+          { role: "user", content: body.slice(0, 2000) },
+        ], 800, 0.2, true);
+        if (!result.available) return { available: false, translatedText: null, sourceLang: null };
+        let parsed: { translation?: unknown; sourceLang?: unknown } = {};
+        try { parsed = JSON.parse(result.text ?? "{}") as typeof parsed; } catch { parsed = {}; }
+        const translatedText = typeof parsed.translation === "string" ? parsed.translation.trim() : "";
+        if (!translatedText) throw new Error("Translation didn't go through. Try again in a bit.");
+        const sourceLang = typeof parsed.sourceLang === "string" ? parsed.sourceLang.slice(0, 8) : null;
+        translationCache.set(cacheKey, { text: translatedText, sourceLang });
+        if (translationCache.size > 500) {
+          const oldest = translationCache.keys().next();
+          if (!oldest.done) translationCache.delete(oldest.value);
+        }
+        return { available: true, translatedText, sourceLang };
+      } catch (error) {
+        if (error instanceof Error && /didn't go through|nothing to translate|Pick a post/.test(error.message)) throw error;
+        console.error("translateYardPost failed:", error instanceof Error ? error.message : error);
+        throw new Error("Translation didn't go through. Try again in a bit.");
+      }
+    },
+  }),
+
   listYardScoreboard: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, search: z.string().trim().max(80).default("") }),
     response: z.object({ items: z.array(yardScoreItemSchema), totalRatings: z.number(), ratedBusinesses: z.number(), asOf: z.string() }),
@@ -2443,6 +2519,7 @@ export const Actions = {
       history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(1000) })).max(10).default([]),
       lat: z.number().min(-90).max(90).optional(),
       lng: z.number().min(-180).max(180).optional(),
+      lang: z.enum(["en", "es"]).optional(),
     }),
     response: samResponseSchema,
     async handler(ctx, args): Promise<z.infer<typeof samResponseSchema>> {
@@ -2451,6 +2528,17 @@ export const Actions = {
       const lower = text.toLowerCase().replace(/[’]/g, "'");
       const courtesyText = lower.replace(/[.!?]+$/g, "").trim();
       const reply = (message: string, scope: z.infer<typeof samScopeSchema>, sources: Array<{ title: string; url: string }> = []): z.infer<typeof samResponseSchema> => ({ reply: message, scope, sources });
+      // Spanish UI language: answer in natural trucker Spanish via the AI fallback.
+      // Falls through to the rule-based English replies when no key is configured.
+      if (args.lang === "es") {
+        const driverName = account.displayName?.split(" ")[0] ?? "conductor";
+        const esResult = await openAiChat([
+          { role: "system", content: `Eres Sam the Semi, un compa\u00f1ero camionero amable dentro de la app RigRevenue. Hablas con ${driverName}. Ayudas con horas de servicio (HOS), matem\u00e1ticas de combustible, mantenimiento e inspecciones, t\u00e9rminos camioneros, b\u00e1sculas, detenci\u00f3n, GPS para camiones, tarifas de reefer, precios de di\u00e9sel y la app RigRevenue. S\u00e9 c\u00e1lido, directo, un poco juguet\u00f3n y habla como un camionero de verdad. Responde SIEMPRE en espa\u00f1ol natural y de carretera (puedes usar t\u00e9rminos en ingl\u00e9s cuando sea lo normal entre camioneros, como "logbook" o "deadhead"). S\u00e9 conciso y \u00fatil. Si no sabes algo, dilo con honestidad. Nunca seas rom\u00e1ntico ni sexual: si te provocan, desv\u00eda el tema con respeto y vuelve al trabajo.` },
+          ...args.history.slice(-6).map((item) => ({ role: item.role as "user" | "assistant", content: item.content })),
+          { role: "user", content: text },
+        ], 500, 0.7);
+        if (esResult.available && esResult.text) return reply(esResult.text, "ai");
+      }
       const money = (value: number) => `$${value.toFixed(2)}`;
       const samTruck = (await ctx.db<typeof schema>().select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0] ?? null;
       const samCompany = (await ctx.db<typeof schema>().select().from(schema.companyProfile).where(eq(schema.companyProfile.accountId, account.id)).limit(1))[0] ?? null;
