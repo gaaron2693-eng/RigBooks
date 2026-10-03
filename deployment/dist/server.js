@@ -37,6 +37,7 @@ var exports_schema = {};
 __export(exports_schema, {
   accountSessions: () => accountSessions,
   accounts: () => accounts,
+  communityRatings: () => communityRatings,
   compInvites: () => compInvites,
   companyProfile: () => companyProfile,
   detentionClaims: () => detentionClaims,
@@ -345,6 +346,25 @@ var detentionClaims = pgTable("detention_claims", {
 }, (table) => [
   index("detention_claims_account_created_idx").on(table.accountId, table.createdAt)
 ]);
+var communityRatings = pgTable("community_ratings", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  entityType: text("entity_type", { enum: ["broker", "shipper", "receiver"] }).notNull(),
+  entityName: text("entity_name").notNull(),
+  normalizedName: text("normalized_name").notNull(),
+  detentionScore: integer("detention_score"),
+  paymentScore: integer("payment_score"),
+  honestyScore: integer("honesty_score"),
+  waitScore: integer("wait_score"),
+  treatmentScore: integer("treatment_score"),
+  comment: text("comment"),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [
+  uniqueIndex("community_ratings_account_entity_unique").on(table.accountId, table.entityType, table.normalizedName),
+  index("community_ratings_entity_lookup_idx").on(table.entityType, table.normalizedName),
+  index("community_ratings_updated_at_idx").on(table.updatedAt)
+]);
 
 // src/actions.ts
 var driverTypeSchema = z.enum(["company_driver", "lease_purchase", "owner_operator", "hourly_driver"]);
@@ -523,6 +543,23 @@ var detentionClaimSchema = z.object({
   billableHours: z.number(),
   amountOwed: z.number(),
   createdAt: z.string()
+});
+var yardEntityTypeSchema = z.enum(["broker", "shipper", "receiver"]);
+var yardRatingDetailSchema = z.object({
+  detention: z.number().nullable(),
+  payment: z.number().nullable(),
+  honesty: z.number().nullable(),
+  wait: z.number().nullable(),
+  treatment: z.number().nullable()
+});
+var yardScoreItemSchema = z.object({
+  entityType: yardEntityTypeSchema,
+  entityName: z.string(),
+  ratingCount: z.number(),
+  overall: z.number(),
+  details: yardRatingDetailSchema,
+  myRating: yardRatingDetailSchema.nullable(),
+  updatedAt: z.string()
 });
 var companyProfileSchema = z.object({
   companyName: z.string(),
@@ -823,6 +860,9 @@ function toDetentionClaim(row, now = new Date) {
     amountOwed: Math.round(billableMinutes * row.hourlyRateCents / 60) / 100,
     createdAt: row.createdAt.toISOString()
   };
+}
+function normalizeYardBusinessName(value) {
+  return value.trim().toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 }
 async function loadCompanyProfile(ctx, sessionToken) {
   const account = await requireAccount(ctx, sessionToken);
@@ -2412,6 +2452,78 @@ var Actions = {
       return { liked: true };
     }
   }),
+  listYardScoreboard: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, search: z.string().trim().max(80).default("") }),
+    response: z.object({ items: z.array(yardScoreItemSchema), totalRatings: z.number(), ratedBusinesses: z.number(), asOf: z.string() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const rows = await ctx.db().select().from(communityRatings).orderBy(desc(communityRatings.updatedAt));
+      const groups = new Map;
+      for (const row of rows) {
+        const key = `${row.entityType}:${row.normalizedName}`;
+        const group = groups.get(key) ?? [];
+        group.push(row);
+        groups.set(key, group);
+      }
+      const round = (value) => Math.round(value * 10) / 10;
+      const average = (values) => {
+        const valid = values.filter((value) => value !== null);
+        return valid.length ? round(valid.reduce((sum, value) => sum + value, 0) / valid.length) : null;
+      };
+      const query = normalizeYardBusinessName(args.search);
+      const items = [];
+      for (const group of groups.values()) {
+        const newest = group[0];
+        if (!newest || query && !newest.normalizedName.includes(query))
+          continue;
+        const detention = average(group.map((row) => row.detentionScore));
+        const payment = average(group.map((row) => row.paymentScore));
+        const honesty = average(group.map((row) => row.honestyScore));
+        const wait = average(group.map((row) => row.waitScore));
+        const treatment = average(group.map((row) => row.treatmentScore));
+        const scores = newest.entityType === "broker" ? [detention, payment, honesty].filter((value) => value !== null) : [wait, treatment].filter((value) => value !== null);
+        const mine = group.find((row) => row.accountId === account.id);
+        items.push({
+          entityType: newest.entityType,
+          entityName: newest.entityName,
+          ratingCount: group.length,
+          overall: scores.length ? round(scores.reduce((sum, value) => sum + value, 0) / scores.length) : 0,
+          details: { detention, payment, honesty, wait, treatment },
+          myRating: mine ? { detention: mine.detentionScore, payment: mine.paymentScore, honesty: mine.honestyScore, wait: mine.waitScore, treatment: mine.treatmentScore } : null,
+          updatedAt: newest.updatedAt.toISOString()
+        });
+      }
+      items.sort((a, b) => b.overall - a.overall || b.ratingCount - a.ratingCount || a.entityName.localeCompare(b.entityName));
+      return { items, totalRatings: rows.length, ratedBusinesses: groups.size, asOf: new Date().toISOString() };
+    }
+  }),
+  saveYardRating: defineAction({
+    request: z.discriminatedUnion("entityType", [
+      z.object({ sessionToken: sessionTokenSchema, entityType: z.literal("broker"), entityName: z.string().trim().min(2).max(100), detention: z.number().int().min(1).max(5), payment: z.number().int().min(1).max(5), honesty: z.number().int().min(1).max(5) }),
+      z.object({ sessionToken: sessionTokenSchema, entityType: z.enum(["shipper", "receiver"]), entityName: z.string().trim().min(2).max(100), wait: z.number().int().min(1).max(5), treatment: z.number().int().min(1).max(5) })
+    ]),
+    response: z.object({ id: z.number(), updated: z.boolean() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const normalizedName = normalizeYardBusinessName(args.entityName);
+      if (normalizedName.length < 2)
+        throw new Error("Enter the broker, shipper, or receiver name.");
+      const db = ctx.db();
+      const existing = (await db.select({ id: communityRatings.id }).from(communityRatings).where(and(eq(communityRatings.accountId, account.id), eq(communityRatings.entityType, args.entityType), eq(communityRatings.normalizedName, normalizedName))).limit(1))[0];
+      const values = args.entityType === "broker" ? { entityName: args.entityName.trim(), normalizedName, detentionScore: args.detention, paymentScore: args.payment, honestyScore: args.honesty, waitScore: null, treatmentScore: null, updatedAt: new Date } : { entityName: args.entityName.trim(), normalizedName, detentionScore: null, paymentScore: null, honestyScore: null, waitScore: args.wait, treatmentScore: args.treatment, updatedAt: new Date };
+      if (existing) {
+        await db.update(communityRatings).set(values).where(eq(communityRatings.id, existing.id));
+        ctx.invalidateQueries();
+        return { id: existing.id, updated: true };
+      }
+      const insertedRows = await db.insert(communityRatings).values({ accountId: account.id, entityType: args.entityType, ...values }).returning({ id: communityRatings.id });
+      const inserted = insertedRows[0];
+      if (!inserted)
+        throw new Error("Could not save that rating.");
+      ctx.invalidateQueries();
+      return { id: inserted.id, updated: false };
+    }
+  }),
   getTruckProfile: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema }),
     response: z.object({ configured: z.boolean(), truckName: z.string(), currentOdometer: z.number(), lastPmOdometer: z.number(), pmInterval: z.number(), nextPmDue: z.number(), milesRemaining: z.number(), status: z.enum(["ok", "soon", "due"]), heightInches: z.number(), weightPounds: z.number(), lengthFeet: z.number(), widthInches: z.number(), hasPrePass: z.boolean() }),
@@ -3013,7 +3125,7 @@ var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql"];
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql"];
 var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
