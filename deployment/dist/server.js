@@ -1139,7 +1139,7 @@ var Actions = {
       return {
         authenticated: Boolean(account),
         suggestedName: viewerDisplayName(viewer),
-        account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, createdAt: account.createdAt.toISOString() } : null,
+        account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() } : null,
         legacyRole: inheritedRole,
         sessionToken: activeToken
       };
@@ -1186,7 +1186,7 @@ var Actions = {
       if (role === "creator")
         await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
-      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, createdAt: account.createdAt.toISOString() }, sessionToken };
+      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() }, sessionToken };
     }
   }),
   signInWithEmail: defineAction({
@@ -1203,7 +1203,7 @@ var Actions = {
         throw new Error("Email or password is incorrect.");
       const sessionToken = await issueSession(ctx, account.id);
       ctx.invalidateQueries();
-      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, createdAt: account.createdAt.toISOString() }, sessionToken };
+      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() }, sessionToken };
     }
   }),
   signOut: defineAction({
@@ -1271,7 +1271,7 @@ var Actions = {
       const viewerId = viewerIdentity(viewer);
       const existing = (await db.select().from(accounts).where(eq(accounts.viewerFbid, viewerId)).limit(1))[0];
       if (existing)
-        return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, createdAt: existing.createdAt.toISOString() };
+        return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, profileImageUrl: existing.profileImageBlobKey ? await ctx.blobs.getUrl(existing.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: existing.createdAt.toISOString() };
       const legacy = (await db.select().from(subscriptionAccess).where(eq(subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role = viewer.isOwner ? "creator" : legacy?.role ?? "standard";
       const accessLabel = viewer.isOwner ? "RigRevenue creator" : legacy?.label ?? null;
@@ -1289,7 +1289,7 @@ var Actions = {
       if (role === "creator")
         await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
-      return { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, createdAt: account.createdAt.toISOString() };
+      return { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() };
     }
   }),
   updateAccount: defineAction({
