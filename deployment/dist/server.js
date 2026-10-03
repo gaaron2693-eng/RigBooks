@@ -703,15 +703,6 @@ async function getOrCreateStripeCustomer(ctx, account) {
     await db.insert(stripeSubscriptions).values({ accountId: account.id, stripeCustomerId: customerId, status: "none" });
   return customerId;
 }
-var prePassColumnReady = false;
-async function ensurePrePassColumn(ctx) {
-  if (prePassColumnReady)
-    return;
-  prePassColumnReady = true;
-  try {
-    await ctx.db().run(sql.raw('ALTER TABLE "truck_profiles" ADD COLUMN IF NOT EXISTS "has_prepass" BOOLEAN NOT NULL DEFAULT FALSE'));
-  } catch {}
-}
 function bytesToHex(bytes) {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
 }
@@ -2559,7 +2550,6 @@ var Actions = {
     response: z.object({ configured: z.boolean(), truckName: z.string(), currentOdometer: z.number(), lastPmOdometer: z.number(), pmInterval: z.number(), nextPmDue: z.number(), milesRemaining: z.number(), status: z.enum(["ok", "soon", "due"]), heightInches: z.number(), weightPounds: z.number(), lengthFeet: z.number(), widthInches: z.number(), hasPrePass: z.boolean() }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
-      await ensurePrePassColumn(ctx);
       const row = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
       if (!row)
         return { configured: false, truckName: "My truck", currentOdometer: 0, lastPmOdometer: 0, pmInterval: 15000, nextPmDue: 15000, milesRemaining: 15000, status: "ok", heightInches: 162, weightPounds: 80000, lengthFeet: 75, widthInches: 102, hasPrePass: false };
@@ -2578,7 +2568,6 @@ var Actions = {
       const account = await requireAccount(ctx, args.sessionToken);
       if (args.lastPmOdometer > args.currentOdometer)
         throw new Error("Last PM reading cannot be higher than the current odometer.");
-      await ensurePrePassColumn(ctx);
       const db = ctx.db();
       const row = (await db.select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
       const values = { accountId: account.id, truckName: args.truckName.trim(), currentOdometerTenths: Math.round(args.currentOdometer * 10), lastPmOdometerTenths: Math.round(args.lastPmOdometer * 10), pmIntervalTenths: Math.round(args.pmInterval * 10), heightInches: args.heightInches ?? row?.heightInches ?? 162, weightPounds: args.weightPounds ?? row?.weightPounds ?? 80000, lengthFeet: args.lengthFeet ?? row?.lengthFeet ?? 75, widthInches: args.widthInches ?? row?.widthInches ?? 102, hasPrePass: args.hasPrePass ?? row?.hasPrePass ?? false, updatedAt: new Date };
@@ -2595,7 +2584,6 @@ var Actions = {
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
-      await ensurePrePassColumn(ctx);
       const db = ctx.db();
       const row = (await db.select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
       const values = { accountId: account.id, truckName: args.truckName.trim(), heightInches: args.heightInches, weightPounds: args.weightPounds, lengthFeet: args.lengthFeet, widthInches: args.widthInches, hasPrePass: args.hasPrePass, currentOdometerTenths: row?.currentOdometerTenths ?? 0, lastPmOdometerTenths: row?.lastPmOdometerTenths ?? 0, pmIntervalTenths: row?.pmIntervalTenths ?? 150000, updatedAt: new Date };
@@ -2614,7 +2602,6 @@ var Actions = {
       const account = await requireAccount(ctx, args.sessionToken);
       if (!await accountHasProAccess(ctx, account))
         throw new Error("Road for Truckers requires RigRevenue Pro.");
-      await ensurePrePassColumn(ctx);
       const truck = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
       if (!truck)
         throw new Error("Add your truck profile before planning a route.");
@@ -2812,7 +2799,6 @@ These are weekly reefer lane reports, not a live load-board quote. Open Market Z
         return reply("Lord, guide this driver with a clear mind, patient hands, and wise decisions. Watch over the road, the truck, everyone nearby, and the family waiting at home. Bring them through this run safely and in peace. Amen.", "prayer");
       }
       if (/maintenance|\bpm\b|preventive|oil change|service due|pre[- ]?trip|post[- ]?trip|tire|brake|coolant/.test(lower)) {
-        await ensurePrePassColumn(ctx);
         const truck = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
         if (/pre[- ]?trip|inspection/.test(lower))
           return reply("Before rolling: inspect tires and wheels, brakes and air lines, lights and reflectors, coupling and fifth wheel, fluids and leaks, steering, mirrors and glass, wipers, horn, emergency gear, load securement, and trailer doors. Do a brake test, verify paperwork, and record defects in HOS \u2192 DVIR. If a safety item is questionable, park it and get it checked.", "maintenance");
