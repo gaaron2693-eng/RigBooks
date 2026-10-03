@@ -360,3 +360,22 @@ export const yardModerationLogs = pgTable("yard_moderation_logs", {
   reason: text("reason").notNull(),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
 }, (table) => [index("yard_moderation_logs_created_at_idx").on(table.createdAt)]);
+
+export const walletDocuments = pgTable("wallet_documents", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  category: text("category", { enum: ["cdl", "medical_card", "vehicle_registration", "insurance_card", "ifta_license", "other"] }).notNull(),
+  name: text("name").notNull(),
+  issuingAuthority: text("issuing_authority"),
+  issueDate: text("issue_date"),
+  expiryDate: text("expiry_date"),
+  notes: text("notes"),
+  frontPhotoKey: text("front_photo_key").notNull(),
+  frontMimeType: text("front_mime_type").notNull(),
+  backPhotoKey: text("back_photo_key"),
+  backMimeType: text("back_mime_type"),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [
+  index("wallet_documents_account_expiry_idx").on(table.accountId, table.expiryDate),
+]);
