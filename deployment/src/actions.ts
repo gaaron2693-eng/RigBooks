@@ -2030,6 +2030,36 @@ export const Actions = {
     },
   }),
 
+  deleteDriverPost: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, postId: z.number().int().positive() }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const post = (await db.select({ id: schema.driverPosts.id, accountId: schema.driverPosts.accountId }).from(schema.driverPosts).where(eq(schema.driverPosts.id, args.postId)).limit(1))[0];
+      if (!post) return { ok: true };
+      if (account.role !== "creator" && post.accountId !== account.id) throw new Error("You can only delete your own posts.");
+      await db.delete(schema.driverPosts).where(eq(schema.driverPosts.id, post.id));
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  deleteDriverReply: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, replyId: z.number().int().positive() }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db<typeof schema>();
+      const reply = (await db.select({ id: schema.driverReplies.id, accountId: schema.driverReplies.accountId }).from(schema.driverReplies).where(eq(schema.driverReplies.id, args.replyId)).limit(1))[0];
+      if (!reply) return { ok: true };
+      if (account.role !== "creator" && reply.accountId !== account.id) throw new Error("You can only delete your own replies.");
+      await db.delete(schema.driverReplies).where(eq(schema.driverReplies.id, reply.id));
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
   listYardScoreboard: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, search: z.string().trim().max(80).default("") }),
     response: z.object({ items: z.array(yardScoreItemSchema), totalRatings: z.number(), ratedBusinesses: z.number(), asOf: z.string() }),
