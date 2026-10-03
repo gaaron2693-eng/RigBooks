@@ -940,8 +940,8 @@ export const Actions = {
       imageDataBase64: z.string().max(8_000_000),
       imageMimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
     }),
-    response: z.object({ ok: z.literal(true) }),
-    async handler(ctx, args): Promise<{ ok: true }> {
+    response: z.object({ ok: z.literal(true), profileImageUrl: z.string().nullable() }),
+    async handler(ctx, args): Promise<{ ok: true; profileImageUrl: string | null }> {
       const account = await requireAccount(ctx, args.sessionToken);
       const bytes = Buffer.from(args.imageDataBase64, "base64");
       if (bytes.byteLength === 0 || bytes.byteLength > 5_000_000) throw new Error("Profile image must be 5 MB or smaller.");
@@ -951,7 +951,8 @@ export const Actions = {
       await ctx.db<typeof schema>().update(schema.accounts).set({ profileImageBlobKey: nextKey, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
       if (account.profileImageBlobKey) await ctx.blobs.delete(account.profileImageBlobKey).catch(() => undefined);
       ctx.invalidateQueries();
-      return { ok: true };
+      const profileImageUrl = await ctx.blobs.getUrl(nextKey, { expiresInSeconds: 3600 }).catch(() => null);
+      return { ok: true, profileImageUrl };
     },
   }),
 
