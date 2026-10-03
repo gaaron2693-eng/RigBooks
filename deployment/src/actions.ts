@@ -2997,13 +2997,17 @@ export const Actions = {
     }),
     response: scannedLoadSchema,
     async handler(ctx, args): Promise<z.infer<typeof scannedLoadSchema>> {
-      return ctx.inference.complete(
-        "Read this trucking rate confirmation or load sheet. Extract the pickup location, delivery location, loaded miles, total carrier/load pay, load/reference number, and broker or customer. Preserve useful city/state or full address text. Use null for anything not visible or uncertain. Money and miles must be numbers without symbols.",
-        {
-          schema: scannedLoadSchema,
-          images: [{ dataBase64: args.imageDataBase64, mimeType: args.mimeType, filename: args.filename }],
-        },
-      );
+      try {
+        return await ctx.inference.complete(
+          "Read this trucking rate confirmation or load sheet. Extract the pickup location, delivery location, loaded miles, total carrier/load pay, load/reference number, and broker or customer. Preserve useful city/state or full address text. Use null for anything not visible or uncertain. Money and miles must be numbers without symbols.",
+          {
+            schema: scannedLoadSchema,
+            images: [{ dataBase64: args.imageDataBase64, mimeType: args.mimeType, filename: args.filename }],
+          },
+        );
+      } catch {
+        throw new Error("Auto-read is taking a break right now. Enter the load details by hand — it only takes a minute.");
+      }
     },
   }),
 
