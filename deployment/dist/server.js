@@ -73,6 +73,7 @@ var accounts = pgTable("accounts", {
   passwordSalt: text("password_salt"),
   role: text("role", { enum: ["standard", "creator", "tester"] }).notNull().default("standard"),
   accessLabel: text("access_label"),
+  profileImageBlobKey: text("profile_image_blob_key"),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [
@@ -90,6 +91,7 @@ var driverPosts = pgTable("driver_posts", {
   id: serial("id").primaryKey(),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
   body: text("body").notNull(),
+  imageBlobKey: text("image_blob_key"),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [index("driver_posts_created_at_idx").on(table.createdAt)]);
 var driverReplies = pgTable("driver_replies", {
@@ -1300,6 +1302,44 @@ var Actions = {
       return { ok: true };
     }
   }),
+  saveProfileImage: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      imageDataBase64: z.string().max(8000000),
+      imageMimeType: z.enum(["image/jpeg", "image/png", "image/webp"])
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const bytes = Buffer.from(args.imageDataBase64, "base64");
+      if (bytes.byteLength === 0 || bytes.byteLength > 5000000)
+        throw new Error("Profile image must be 5 MB or smaller.");
+      const ext = args.imageMimeType === "image/png" ? "png" : args.imageMimeType === "image/webp" ? "webp" : "jpg";
+      const nextKey = `profiles/${account.id}-${crypto.randomUUID()}.${ext}`;
+      await ctx.blobs.put(nextKey, bytes, { contentType: args.imageMimeType });
+      await ctx.db().update(accounts).set({ profileImageBlobKey: nextKey, updatedAt: new Date }).where(eq(accounts.id, account.id));
+      if (account.profileImageBlobKey)
+        await ctx.blobs.delete(account.profileImageBlobKey).catch(() => {
+          return;
+        });
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
+  removeProfileImage: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      await ctx.db().update(accounts).set({ profileImageBlobKey: null, updatedAt: new Date }).where(eq(accounts.id, account.id));
+      if (account.profileImageBlobKey)
+        await ctx.blobs.delete(account.profileImageBlobKey).catch(() => {
+          return;
+        });
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
   getSubscriptionAccess: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, clientId: clientIdSchema }),
     response: z.object({
@@ -2392,14 +2432,36 @@ var Actions = {
     }
   }),
   createDriverPost: defineAction({
-    request: z.object({ sessionToken: sessionTokenSchema, body: z.string().trim().min(1).max(600) }),
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      body: z.string().trim().max(600).default(""),
+      imageDataBase64: z.string().max(16000000).optional(),
+      imageMimeType: z.enum(["image/jpeg", "image/png", "image/webp"]).optional()
+    }),
     response: z.object({ id: z.number() }),
     async handler(ctx, args) {
+      const body = args.body.trim();
+      if (!body && !args.imageDataBase64)
+        throw new Error("Write something or add a photo before posting.");
+      if (Boolean(args.imageDataBase64) !== Boolean(args.imageMimeType))
+        throw new Error("That photo could not be read. Choose it again.");
       const account = await requireAccount(ctx, args.sessionToken);
-      const rows = await ctx.db().insert(driverPosts).values({ accountId: account.id, body: args.body.trim() }).returning({ id: driverPosts.id });
+      let imageBlobKey = null;
+      if (args.imageDataBase64 && args.imageMimeType) {
+        const bytes = Buffer.from(args.imageDataBase64, "base64");
+        if (bytes.byteLength === 0 || bytes.byteLength > 1e7)
+          throw new Error("Use a JPEG, PNG, or WebP photo under 10 MB.");
+        const extension = args.imageMimeType === "image/png" ? "png" : args.imageMimeType === "image/webp" ? "webp" : "jpg";
+        imageBlobKey = `yard/posts/${crypto.randomUUID()}.${extension}`;
+        await ctx.blobs.put(imageBlobKey, bytes, { contentType: args.imageMimeType });
+      }
+      const rows = await ctx.db().insert(driverPosts).values({ accountId: account.id, body, imageBlobKey }).returning({ id: driverPosts.id });
       const row = rows[0];
-      if (!row)
+      if (!row) {
+        if (imageBlobKey)
+          await ctx.blobs.delete(imageBlobKey);
         throw new Error("Could not publish that post.");
+      }
       ctx.invalidateQueries();
       return { id: row.id };
     }
@@ -3278,7 +3340,7 @@ var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql"];
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql", "010_yard_post_photos.sql", "011_profile_image.sql"];
 var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
