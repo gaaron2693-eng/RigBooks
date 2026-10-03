@@ -2346,6 +2346,7 @@ export const Actions = {
         "client_reference_id": String(account.id),
         "metadata[accountId]": String(account.id),
         "subscription_data[metadata][accountId]": String(account.id),
+        "subscription_data[trial_period_days]": "3",
         "success_url": "https://rigrevenue.onrender.com/?checkout=success&session_id={CHECKOUT_SESSION_ID}",
         "cancel_url": "https://rigrevenue.onrender.com/?checkout=cancelled",
       });
@@ -2366,24 +2367,29 @@ export const Actions = {
       let plan: "weekly" | "monthly" | "yearly" | null = null;
       let renewsAt: string | null = null;
       const subscriptionId = typeof session.subscription === "string" ? session.subscription : null;
-      if (session.payment_status === "paid" && subscriptionId) {
+      if (subscriptionId) {
         const subscription = await stripeApi(`/subscriptions/${subscriptionId}`, "GET");
-        const priceId = subscription?.items?.data?.[0]?.price?.id;
-        plan = (typeof priceId === "string" && stripeTestPlanByPrice[priceId]) || null;
-        const periodEnd = typeof subscription.current_period_end === "number" ? new Date(subscription.current_period_end * 1000) : null;
-        renewsAt = periodEnd ? periodEnd.toISOString() : null;
-        const values = {
-          stripeCustomerId: String(subscription.customer),
-          stripeSubscriptionId: subscriptionId,
-          plan,
-          status: String(subscription.status || "unknown"),
-          currentPeriodEnd: periodEnd,
-          cancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end),
-          updatedAt: new Date(),
-        };
-        const existing = (await db.select().from(schema.stripeSubscriptions).where(eq(schema.stripeSubscriptions.accountId, account.id)).limit(1))[0];
-        if (existing) await db.update(schema.stripeSubscriptions).set(values).where(eq(schema.stripeSubscriptions.id, existing.id));
-        else await db.insert(schema.stripeSubscriptions).values({ accountId: account.id, ...values });
+        const subStatus = String(subscription?.status || "");
+        // Trial checkouts collect no upfront payment, so gate on the
+        // subscription's status instead of the session's payment_status.
+        if (subStatus === "active" || subStatus === "trialing") {
+          const priceId = subscription?.items?.data?.[0]?.price?.id;
+          plan = (typeof priceId === "string" && stripeTestPlanByPrice[priceId]) || null;
+          const periodEnd = typeof subscription.current_period_end === "number" ? new Date(subscription.current_period_end * 1000) : null;
+          renewsAt = periodEnd ? periodEnd.toISOString() : null;
+          const values = {
+            stripeCustomerId: String(subscription.customer),
+            stripeSubscriptionId: subscriptionId,
+            plan,
+            status: String(subscription.status || "unknown"),
+            currentPeriodEnd: periodEnd,
+            cancelAtPeriodEnd: Boolean(subscription.cancel_at_period_end),
+            updatedAt: new Date(),
+          };
+          const existing = (await db.select().from(schema.stripeSubscriptions).where(eq(schema.stripeSubscriptions.accountId, account.id)).limit(1))[0];
+          if (existing) await db.update(schema.stripeSubscriptions).set(values).where(eq(schema.stripeSubscriptions.id, existing.id));
+          else await db.insert(schema.stripeSubscriptions).values({ accountId: account.id, ...values });
+        }
       }
       return { hasPro: await accountHasProAccess(ctx, account), plan, renewsAt };
     },
