@@ -77,6 +77,7 @@ var accounts = pgTable("accounts", {
   profileImageBlobKey: text("profile_image_blob_key"),
   backgroundImageBlobKey: text("background_image_blob_key"),
   backgroundOpacity: integer("background_opacity").notNull().default(18),
+  language: text("language").notNull().default("en"),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [
@@ -609,6 +610,29 @@ var companyProfileSchema = z.object({
   dotNumber: z.string().nullable(),
   logoUrl: z.string().nullable()
 });
+var translationCache = new Map;
+async function openAiChat(messages, maxTokens, temperature, jsonMode = false) {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key || !key.startsWith("sk-"))
+    return { available: false, text: null };
+  try {
+    const body = { model: "gpt-4o-mini", messages, max_tokens: maxTokens, temperature };
+    if (jsonMode)
+      body.response_format = { type: "json_object" };
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok)
+      return { available: false, text: null };
+    const data = await resp.json();
+    const text = data.choices?.[0]?.message?.content?.trim() ?? null;
+    return { available: !!text, text };
+  } catch {
+    return { available: false, text: null };
+  }
+}
 var accountSchema = z.object({
   id: z.number(),
   displayName: z.string(),
@@ -619,6 +643,7 @@ var accountSchema = z.object({
   profileImageUrl: z.string().nullable(),
   backgroundImageUrl: z.string().nullable(),
   backgroundOpacity: z.number().int().min(5).max(30),
+  language: z.enum(["en", "es"]),
   createdAt: z.string()
 });
 var driverReplySchema = z.object({
@@ -1187,7 +1212,7 @@ var Actions = {
       return {
         authenticated: Boolean(account),
         suggestedName: viewerDisplayName(viewer),
-        account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() } : null,
+        account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, language: account.language ?? "en", createdAt: account.createdAt.toISOString() } : null,
         legacyRole: inheritedRole,
         sessionToken: activeToken
       };
@@ -1234,7 +1259,7 @@ var Actions = {
       if (role === "creator")
         await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
-      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() }, sessionToken };
+      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, language: account.language ?? "en", createdAt: account.createdAt.toISOString() }, sessionToken };
     }
   }),
   signInWithEmail: defineAction({
@@ -1251,7 +1276,7 @@ var Actions = {
         throw new Error("Email or password is incorrect.");
       const sessionToken = await issueSession(ctx, account.id);
       ctx.invalidateQueries();
-      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() }, sessionToken };
+      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, language: account.language ?? "en", createdAt: account.createdAt.toISOString() }, sessionToken };
     }
   }),
   signOut: defineAction({
@@ -1319,7 +1344,7 @@ var Actions = {
       const viewerId = viewerIdentity(viewer);
       const existing = (await db.select().from(accounts).where(eq(accounts.viewerFbid, viewerId)).limit(1))[0];
       if (existing)
-        return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, profileImageUrl: existing.profileImageBlobKey ? await ctx.blobs.getUrl(existing.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: existing.backgroundImageBlobKey ? await ctx.blobs.getUrl(existing.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: existing.backgroundOpacity, createdAt: existing.createdAt.toISOString() };
+        return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, profileImageUrl: existing.profileImageBlobKey ? await ctx.blobs.getUrl(existing.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: existing.backgroundImageBlobKey ? await ctx.blobs.getUrl(existing.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: existing.backgroundOpacity, language: existing.language ?? "en", createdAt: existing.createdAt.toISOString() };
       const legacy = (await db.select().from(subscriptionAccess).where(eq(subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role = viewer.isOwner ? "creator" : legacy?.role ?? "standard";
       const accessLabel = viewer.isOwner ? "RigRevenue creator" : legacy?.label ?? null;
@@ -1337,7 +1362,7 @@ var Actions = {
       if (role === "creator")
         await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
-      return { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() };
+      return { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, language: account.language ?? "en", createdAt: account.createdAt.toISOString() };
     }
   }),
   updateAccount: defineAction({
@@ -1347,6 +1372,15 @@ var Actions = {
       const account = await requireAccount(ctx, args.sessionToken);
       await ctx.db().update(accounts).set({ displayName: args.displayName.trim(), email: args.email.trim().toLowerCase(), updatedAt: new Date }).where(eq(accounts.id, account.id));
       ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
+  setLanguage: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, language: z.enum(["en", "es"]) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      await ctx.db().update(accounts).set({ language: args.language, updatedAt: new Date }).where(eq(accounts.id, account.id));
       return { ok: true };
     }
   }),
@@ -2684,6 +2718,61 @@ var Actions = {
       return { ok: true };
     }
   }),
+  translateYardPost: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, postId: z.number().int().optional(), replyId: z.number().int().optional(), targetLang: z.enum(["en", "es"]).default("en") }),
+    response: z.object({ available: z.boolean(), translatedText: z.string().nullable(), sourceLang: z.string().nullable() }),
+    async handler(ctx, args) {
+      await requireAccount(ctx, args.sessionToken);
+      const hasPost = args.postId != null;
+      const hasReply = args.replyId != null;
+      if (hasPost === hasReply)
+        throw new Error("Pick a post or a reply to translate.");
+      const db = ctx.db();
+      let body = null;
+      const cacheKey = hasPost ? `post:${args.postId}:${args.targetLang}` : `reply:${args.replyId}:${args.targetLang}`;
+      if (hasPost) {
+        body = (await db.select({ body: driverPosts.body }).from(driverPosts).where(eq(driverPosts.id, args.postId)).limit(1))[0]?.body ?? null;
+      } else {
+        body = (await db.select({ body: driverReplies.body }).from(driverReplies).where(eq(driverReplies.id, args.replyId)).limit(1))[0]?.body ?? null;
+      }
+      if (!body?.trim())
+        throw new Error("There's nothing to translate here.");
+      const cached = translationCache.get(cacheKey);
+      if (cached)
+        return { available: true, translatedText: cached.text, sourceLang: cached.sourceLang };
+      const targetName = args.targetLang === "es" ? "Spanish" : "English";
+      try {
+        const result = await openAiChat([
+          { role: "system", content: `Translate the user's text to ${targetName}. Detect the source language. If the text is already in ${targetName}, return it unchanged. Keep trucker slang natural. Reply with JSON only: {"translation": "...", "sourceLang": "<iso code like en, es, fr>"}.` },
+          { role: "user", content: body.slice(0, 2000) }
+        ], 800, 0.2, true);
+        if (!result.available)
+          return { available: false, translatedText: null, sourceLang: null };
+        let parsed = {};
+        try {
+          parsed = JSON.parse(result.text ?? "{}");
+        } catch {
+          parsed = {};
+        }
+        const translatedText = typeof parsed.translation === "string" ? parsed.translation.trim() : "";
+        if (!translatedText)
+          throw new Error("Translation didn't go through. Try again in a bit.");
+        const sourceLang = typeof parsed.sourceLang === "string" ? parsed.sourceLang.slice(0, 8) : null;
+        translationCache.set(cacheKey, { text: translatedText, sourceLang });
+        if (translationCache.size > 500) {
+          const oldest = translationCache.keys().next();
+          if (!oldest.done)
+            translationCache.delete(oldest.value);
+        }
+        return { available: true, translatedText, sourceLang };
+      } catch (error) {
+        if (error instanceof Error && /didn't go through|nothing to translate|Pick a post/.test(error.message))
+          throw error;
+        console.error("translateYardPost failed:", error instanceof Error ? error.message : error);
+        throw new Error("Translation didn't go through. Try again in a bit.");
+      }
+    }
+  }),
   listYardScoreboard: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, search: z.string().trim().max(80).default("") }),
     response: z.object({ items: z.array(yardScoreItemSchema), totalRatings: z.number(), ratedBusinesses: z.number(), asOf: z.string() }),
@@ -2928,7 +3017,8 @@ var Actions = {
       message: z.string().trim().min(1).max(600),
       history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(1000) })).max(10).default([]),
       lat: z.number().min(-90).max(90).optional(),
-      lng: z.number().min(-180).max(180).optional()
+      lng: z.number().min(-180).max(180).optional(),
+      lang: z.enum(["en", "es"]).optional()
     }),
     response: samResponseSchema,
     async handler(ctx, args) {
@@ -2937,6 +3027,16 @@ var Actions = {
       const lower = text.toLowerCase().replace(/[\u2019]/g, "'");
       const courtesyText = lower.replace(/[.!?]+$/g, "").trim();
       const reply = (message, scope, sources = []) => ({ reply: message, scope, sources });
+      if (args.lang === "es") {
+        const driverName = account.displayName?.split(" ")[0] ?? "conductor";
+        const esResult = await openAiChat([
+          { role: "system", content: `Eres Sam the Semi, un compa\xF1ero camionero amable dentro de la app RigRevenue. Hablas con ${driverName}. Ayudas con horas de servicio (HOS), matem\xE1ticas de combustible, mantenimiento e inspecciones, t\xE9rminos camioneros, b\xE1sculas, detenci\xF3n, GPS para camiones, tarifas de reefer, precios de di\xE9sel y la app RigRevenue. S\xE9 c\xE1lido, directo, un poco juguet\xF3n y habla como un camionero de verdad. Responde SIEMPRE en espa\xF1ol natural y de carretera (puedes usar t\xE9rminos en ingl\xE9s cuando sea lo normal entre camioneros, como "logbook" o "deadhead"). S\xE9 conciso y \xFAtil. Si no sabes algo, dilo con honestidad. Nunca seas rom\xE1ntico ni sexual: si te provocan, desv\xEDa el tema con respeto y vuelve al trabajo.` },
+          ...args.history.slice(-6).map((item) => ({ role: item.role, content: item.content })),
+          { role: "user", content: text }
+        ], 500, 0.7);
+        if (esResult.available && esResult.text)
+          return reply(esResult.text, "ai");
+      }
       const money = (value) => `$${value.toFixed(2)}`;
       const samTruck = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0] ?? null;
       const samCompany = (await ctx.db().select().from(companyProfile).where(eq(companyProfile.accountId, account.id)).limit(1))[0] ?? null;
@@ -3549,7 +3649,7 @@ var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql", "010_yard_post_photos.sql", "011_profile_image.sql", "012_yard_moderation_logs.sql", "013_hazmat_truck_brand.sql", "014_custom_app_background.sql"];
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql", "010_yard_post_photos.sql", "011_profile_image.sql", "012_yard_moderation_logs.sql", "013_hazmat_truck_brand.sql", "014_custom_app_background.sql", "015_add_account_language.sql"];
 var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
