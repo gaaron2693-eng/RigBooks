@@ -2452,6 +2452,38 @@ var Actions = {
       return { liked: true };
     }
   }),
+  deleteDriverPost: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, postId: z.number().int().positive() }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const post = (await db.select({ id: driverPosts.id, accountId: driverPosts.accountId }).from(driverPosts).where(eq(driverPosts.id, args.postId)).limit(1))[0];
+      if (!post)
+        return { ok: true };
+      if (account.role !== "creator" && post.accountId !== account.id)
+        throw new Error("You can only delete your own posts.");
+      await db.delete(driverPosts).where(eq(driverPosts.id, post.id));
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
+  deleteDriverReply: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, replyId: z.number().int().positive() }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const db = ctx.db();
+      const reply = (await db.select({ id: driverReplies.id, accountId: driverReplies.accountId }).from(driverReplies).where(eq(driverReplies.id, args.replyId)).limit(1))[0];
+      if (!reply)
+        return { ok: true };
+      if (account.role !== "creator" && reply.accountId !== account.id)
+        throw new Error("You can only delete your own replies.");
+      await db.delete(driverReplies).where(eq(driverReplies.id, reply.id));
+      ctx.invalidateQueries();
+      return { ok: true };
+    }
+  }),
   listYardScoreboard: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, search: z.string().trim().max(80).default("") }),
     response: z.object({ items: z.array(yardScoreItemSchema), totalRatings: z.number(), ratedBusinesses: z.number(), asOf: z.string() }),
