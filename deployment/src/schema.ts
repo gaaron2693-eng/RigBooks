@@ -18,6 +18,7 @@ export const accounts = pgTable("accounts", {
   profileImageBlobKey: text("profile_image_blob_key"),
   backgroundImageBlobKey: text("background_image_blob_key"),
   backgroundOpacity: integer("background_opacity").notNull().default(18),
+  language: text("language").notNull().default("en"),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
