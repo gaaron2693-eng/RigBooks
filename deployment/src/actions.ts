@@ -198,7 +198,9 @@ const companyProfileSchema = z.object({
 });
 const accountSchema = z.object({
   id: z.number(), displayName: z.string(), email: z.string().nullable(), authProvider: authProviderSchema,
-  role: accessRoleSchema, accessLabel: z.string().nullable(), createdAt: z.string(),
+  role: accessRoleSchema, accessLabel: z.string().nullable(), profileImageUrl: z.string().nullable(),
+  backgroundImageUrl: z.string().nullable(), backgroundOpacity: z.number().int().min(5).max(30),
+  createdAt: z.string(),
 });
 const driverReplySchema = z.object({
   id: z.number(), postId: z.number(), driverName: z.string(), body: z.string(), createdAt: z.string(),
@@ -777,7 +779,7 @@ export const Actions = {
       return {
         authenticated: Boolean(account),
         suggestedName: viewerDisplayName(viewer),
-        account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() } : null,
+        account: account ? { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() } : null,
         legacyRole: inheritedRole,
         sessionToken: activeToken,
       };
@@ -821,7 +823,7 @@ export const Actions = {
       const sessionToken = await issueSession(ctx, account.id);
       if (role === "creator") await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
-      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() }, sessionToken };
+      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() }, sessionToken };
     },
   }),
 
@@ -837,7 +839,7 @@ export const Actions = {
       if (!safeEqualHex(account.passwordHash, suppliedHash)) throw new Error("Email or password is incorrect.");
       const sessionToken = await issueSession(ctx, account.id);
       ctx.invalidateQueries();
-      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() }, sessionToken };
+      return { account: { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() }, sessionToken };
     },
   }),
 
@@ -904,7 +906,7 @@ export const Actions = {
       const db = ctx.db<typeof schema>();
       const viewerId = viewerIdentity(viewer);
       const existing = (await db.select().from(schema.accounts).where(eq(schema.accounts.viewerFbid, viewerId)).limit(1))[0];
-      if (existing) return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, profileImageUrl: existing.profileImageBlobKey ? await ctx.blobs.getUrl(existing.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: existing.createdAt.toISOString() };
+      if (existing) return { id: existing.id, displayName: existing.displayName, email: existing.email, authProvider: existing.authProvider, role: existing.role, accessLabel: existing.accessLabel, profileImageUrl: existing.profileImageBlobKey ? await ctx.blobs.getUrl(existing.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: existing.backgroundImageBlobKey ? await ctx.blobs.getUrl(existing.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: existing.backgroundOpacity, createdAt: existing.createdAt.toISOString() };
       const legacy = (await db.select().from(schema.subscriptionAccess).where(eq(schema.subscriptionAccess.clientId, args.legacyClientId)).limit(1))[0];
       const role: z.infer<typeof accessRoleSchema> = viewer.isOwner ? "creator" : (legacy?.role ?? "standard");
       const accessLabel = viewer.isOwner ? "RigRevenue creator" : (legacy?.label ?? null);
@@ -920,7 +922,7 @@ export const Actions = {
       if (!account) throw new Error("Could not create your RigRevenue account.");
       if (role === "creator") await moveUnownedLedgerToAccount(ctx, account.id);
       ctx.invalidateQueries();
-      return { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, createdAt: account.createdAt.toISOString() };
+      return { id: account.id, displayName: account.displayName, email: account.email, authProvider: account.authProvider, role: account.role, accessLabel: account.accessLabel, profileImageUrl: account.profileImageBlobKey ? await ctx.blobs.getUrl(account.profileImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundImageUrl: account.backgroundImageBlobKey ? await ctx.blobs.getUrl(account.backgroundImageBlobKey, { expiresInSeconds: 3600 }) : null, backgroundOpacity: account.backgroundOpacity, createdAt: account.createdAt.toISOString() };
     },
   }),
 
@@ -964,6 +966,50 @@ export const Actions = {
       const account = await requireAccount(ctx, args.sessionToken);
       await ctx.db<typeof schema>().update(schema.accounts).set({ profileImageBlobKey: null, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
       if (account.profileImageBlobKey) await ctx.blobs.delete(account.profileImageBlobKey).catch(() => undefined);
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  saveCustomBackground: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      imageDataBase64: z.string().max(8_000_000),
+      imageMimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const bytes = Buffer.from(args.imageDataBase64, "base64");
+      if (bytes.byteLength === 0 || bytes.byteLength > 5_000_000) throw new Error("Background image must be 5 MB or smaller.");
+      const ext = args.imageMimeType === "image/png" ? "png" : args.imageMimeType === "image/webp" ? "webp" : "jpg";
+      const nextKey = `backgrounds/${account.id}-${crypto.randomUUID()}.${ext}`;
+      await ctx.blobs.put(nextKey, bytes, { contentType: args.imageMimeType });
+      await ctx.db<typeof schema>().update(schema.accounts).set({ backgroundImageBlobKey: nextKey, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
+      if (account.backgroundImageBlobKey) await ctx.blobs.delete(account.backgroundImageBlobKey).catch(() => undefined);
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  setCustomBackgroundOpacity: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, opacity: z.number().int().min(5).max(30) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      await ctx.db<typeof schema>().update(schema.accounts).set({ backgroundOpacity: args.opacity, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  removeCustomBackground: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      await ctx.db<typeof schema>().update(schema.accounts).set({ backgroundImageBlobKey: null, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
+      if (account.backgroundImageBlobKey) await ctx.blobs.delete(account.backgroundImageBlobKey).catch(() => undefined);
       ctx.invalidateQueries();
       return { ok: true };
     },

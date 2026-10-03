@@ -16,6 +16,8 @@ export const accounts = pgTable("accounts", {
   role: text("role", { enum: ["standard", "creator", "tester"] }).notNull().default("standard"),
   accessLabel: text("access_label"),
   profileImageBlobKey: text("profile_image_blob_key"),
+  backgroundImageBlobKey: text("background_image_blob_key"),
+  backgroundOpacity: integer("background_opacity").notNull().default(18),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
