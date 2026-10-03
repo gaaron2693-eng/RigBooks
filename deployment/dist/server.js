@@ -554,14 +554,14 @@ async function requireAccount(ctx, sessionToken) {
   return row;
 }
 var stripeTestPriceByPlan = {
-  weekly: "price_1UKtygLTe9osv09oYHxPoJys",
-  monthly: "price_1UKtyhLTe9osv09owS82qxkq",
-  yearly: "price_1UKtyiLTe9osv09oFHCbM89H"
+  weekly: "price_1UMGyPLA9b278vpHi1GBC7m9",
+  monthly: "price_1UMGyPLA9b278vpH48MWbxmT",
+  yearly: "price_1UMGyQLA9b278vpHMo3Q2tUV"
 };
 var stripeTestPlanByPrice = {
-  price_1UKtygLTe9osv09oYHxPoJys: "weekly",
-  price_1UKtyhLTe9osv09owS82qxkq: "monthly",
-  price_1UKtyiLTe9osv09oFHCbM89H: "yearly"
+  price_1UMGyPLA9b278vpHi1GBC7m9: "weekly",
+  price_1UMGyPLA9b278vpH48MWbxmT: "monthly",
+  price_1UMGyQLA9b278vpHMo3Q2tUV: "yearly"
 };
 var planSchema = z.enum(["weekly", "monthly", "yearly"]);
 function stripeSecretKey() {
@@ -2790,9 +2790,9 @@ var openAiModel = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 var stripeSecretKey2 = process.env.STRIPE_SECRET_KEY?.trim() || null;
 var stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET?.trim() || null;
 var stripeTestPlans = {
-  price_1UKtygLTe9osv09oYHxPoJys: "weekly",
-  price_1UKtyhLTe9osv09owS82qxkq: "monthly",
-  price_1UKtyiLTe9osv09oFHCbM89H: "yearly"
+  price_1UMGyPLA9b278vpHi1GBC7m9: "weekly",
+  price_1UMGyPLA9b278vpH48MWbxmT: "monthly",
+  price_1UMGyQLA9b278vpHMo3Q2tUV: "yearly"
 };
 var port = Number(process.env.PORT || 3000);
 var maxUploadBytes = Number(process.env.MAX_UPLOAD_BYTES || 18000000);
