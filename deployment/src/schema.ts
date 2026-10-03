@@ -389,3 +389,13 @@ export const marketZoneSnapshots = pgTable("market_zone_snapshots", {
 }, (table) => [
   index("market_zone_snapshots_fetched_at_idx").on(table.fetchedAt),
 ]);
+
+export const appFeedback = pgTable("app_feedback", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
+  rating: integer("rating").notNull(),
+  comment: text("comment"),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [
+  index("app_feedback_created_at_idx").on(table.createdAt),
+]);

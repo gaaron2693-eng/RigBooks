@@ -2405,6 +2405,74 @@ export const Actions = {
       };
     },
   }),
+  submitAppFeedback: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      rating: z.number().int().min(1).max(5),
+      comment: z.string().trim().max(1000).optional(),
+    }),
+    response: z.object({ id: z.number() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const comment = args.comment?.trim() ? args.comment.trim() : null;
+      const rows = await ctx.db<typeof schema>().insert(schema.appFeedback).values({
+        accountId: account.id,
+        rating: args.rating,
+        comment,
+      }).returning({ id: schema.appFeedback.id });
+      const row = rows[0];
+      if (!row) throw new Error("Could not save your feedback. Try again in a bit.");
+      return { id: row.id };
+    },
+  }),
+
+  listAppFeedback: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, limit: z.number().int().min(1).max(100).default(50) }),
+    response: z.object({
+      feedback: z.array(z.object({
+        id: z.number(),
+        rating: z.number().int().min(1).max(5),
+        comment: z.string().nullable(),
+        driverName: z.string().nullable(),
+        createdAt: z.string(),
+      })),
+      averageRating: z.number().nullable(),
+      totalCount: z.number(),
+      asOf: z.string(),
+    }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      if (account.role !== "creator") throw new Error("Only the creator can review app feedback.");
+      const db = ctx.db<typeof schema>();
+      const rows = await db.select({
+        id: schema.appFeedback.id,
+        rating: schema.appFeedback.rating,
+        comment: schema.appFeedback.comment,
+        driverName: schema.accounts.displayName,
+        createdAt: schema.appFeedback.createdAt,
+      })
+        .from(schema.appFeedback)
+        .leftJoin(schema.accounts, eq(schema.appFeedback.accountId, schema.accounts.id))
+        .orderBy(desc(schema.appFeedback.createdAt))
+        .limit(args.limit);
+      const all = await db.select({ rating: schema.appFeedback.rating }).from(schema.appFeedback);
+      const averageRating = all.length
+        ? Math.round((all.reduce((sum, r) => sum + r.rating, 0) / all.length) * 10) / 10
+        : null;
+      return {
+        feedback: rows.map((row) => ({
+          id: row.id,
+          rating: row.rating,
+          comment: row.comment,
+          driverName: row.driverName,
+          createdAt: row.createdAt.toISOString(),
+        })),
+        averageRating,
+        totalCount: all.length,
+        asOf: new Date().toISOString(),
+      };
+    },
+  }),
 
   createDriverReply: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, postId: z.number().int().positive(), body: z.string().trim().min(1).max(400) }),
