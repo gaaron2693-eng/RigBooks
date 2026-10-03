@@ -218,6 +218,13 @@ async function openAiChat(messages: Array<{ role: string; content: string }>, ma
   }
 }
 
+const walletDocumentCategorySchema = z.enum(["cdl", "medical_card", "vehicle_registration", "insurance_card", "ifta_license", "other"]);
+const walletPhotoMimeSchema = z.enum(["image/jpeg", "image/png", "image/webp"]);
+const walletDocumentSchema = z.object({
+  id: z.number(), category: walletDocumentCategorySchema, name: z.string(), issuingAuthority: z.string().nullable(),
+  issueDate: z.string().nullable(), expiryDate: z.string().nullable(), notes: z.string().nullable(),
+  frontPhotoUrl: z.string(), backPhotoUrl: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(),
+});
 const accountSchema = z.object({
   id: z.number(), displayName: z.string(), email: z.string().nullable(), authProvider: authProviderSchema,
   role: accessRoleSchema, accessLabel: z.string().nullable(), profileImageUrl: z.string().nullable(),
@@ -1853,6 +1860,113 @@ export const Actions = {
       if (row?.blobKey) await ctx.blobs.delete(row.blobKey);
       ctx.invalidateQueries();
       return { ok: true };
+    },
+  }),
+
+  listWalletDocuments: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ documents: z.array(walletDocumentSchema) }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const rows = await ctx.db<typeof schema>().select().from(schema.walletDocuments)
+        .where(eq(schema.walletDocuments.accountId, account.id)).orderBy(asc(schema.walletDocuments.expiryDate), desc(schema.walletDocuments.createdAt));
+      return { documents: await Promise.all(rows.map(async (row) => ({
+        id: row.id, category: row.category, name: row.name, issuingAuthority: row.issuingAuthority,
+        issueDate: row.issueDate, expiryDate: row.expiryDate, notes: row.notes,
+        frontPhotoUrl: await ctx.blobs.getUrl(row.frontPhotoKey, { expiresInSeconds: 3600 }),
+        backPhotoUrl: row.backPhotoKey ? await ctx.blobs.getUrl(row.backPhotoKey, { expiresInSeconds: 3600 }) : null,
+        createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString(),
+      }))) };
+    },
+  }),
+
+  addWalletDocument: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema,
+      category: walletDocumentCategorySchema, name: z.string().trim().min(1).max(160),
+      issuingAuthority: z.string().max(160).optional(), issueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      expiryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), notes: z.string().max(1000).optional(),
+      frontPhotoDataBase64: z.string().max(16_000_000), frontMimeType: walletPhotoMimeSchema,
+      backPhotoDataBase64: z.string().max(16_000_000).optional(), backMimeType: walletPhotoMimeSchema.optional(),
+    }),
+    response: z.object({ id: z.number() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const frontBytes = Buffer.from(args.frontPhotoDataBase64, "base64");
+      const backBytes = args.backPhotoDataBase64 ? Buffer.from(args.backPhotoDataBase64, "base64") : null;
+      if (frontBytes.byteLength > 10_000_000 || (backBytes && backBytes.byteLength > 10_000_000)) throw new Error("Each document photo must be under 10 MB.");
+      const ext = (mime: "image/jpeg" | "image/png" | "image/webp") => mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
+      const frontPhotoKey = `wallet-docs/${crypto.randomUUID()}.${ext(args.frontMimeType)}`;
+      const backPhotoKey = backBytes && args.backMimeType ? `wallet-docs/${crypto.randomUUID()}.${ext(args.backMimeType)}` : null;
+      await ctx.blobs.put(frontPhotoKey, frontBytes, { contentType: args.frontMimeType });
+      try {
+        if (backPhotoKey && backBytes && args.backMimeType) await ctx.blobs.put(backPhotoKey, backBytes, { contentType: args.backMimeType });
+        const inserted = (await ctx.db<typeof schema>().insert(schema.walletDocuments).values({
+          accountId: account.id, category: args.category, name: args.name.trim(), issuingAuthority: cleanOptional(args.issuingAuthority),
+          issueDate: args.issueDate || null, expiryDate: args.expiryDate || null, notes: cleanOptional(args.notes),
+          frontPhotoKey, frontMimeType: args.frontMimeType, backPhotoKey, backMimeType: backPhotoKey ? args.backMimeType ?? null : null,
+        }).returning({ id: schema.walletDocuments.id }))[0];
+        if (!inserted) throw new Error("Could not save the document.");
+        ctx.invalidateQueries();
+        return { id: inserted.id };
+      } catch (error) {
+        await ctx.blobs.delete(frontPhotoKey).catch(() => undefined);
+        if (backPhotoKey) await ctx.blobs.delete(backPhotoKey).catch(() => undefined);
+        throw error;
+      }
+    },
+  }),
+
+  updateWalletDocument: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, id: z.number().int().positive(),
+      category: walletDocumentCategorySchema, name: z.string().trim().min(1).max(160),
+      issuingAuthority: z.string().max(160).optional(), issueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      expiryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), notes: z.string().max(1000).optional(),
+      frontPhotoDataBase64: z.string().max(16_000_000).optional(), frontMimeType: walletPhotoMimeSchema.optional(),
+      backPhotoDataBase64: z.string().max(16_000_000).optional(), backMimeType: walletPhotoMimeSchema.optional(), removeBackPhoto: z.boolean().optional(),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const db = ctx.db<typeof schema>();
+      const account = await requireAccount(ctx, args.sessionToken);
+      const existing = (await db.select().from(schema.walletDocuments).where(and(eq(schema.walletDocuments.id, args.id), eq(schema.walletDocuments.accountId, account.id))).limit(1))[0];
+      if (!existing) throw new Error("Document not found.");
+      const ext = (mime: "image/jpeg" | "image/png" | "image/webp") => mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
+      let frontPhotoKey = existing.frontPhotoKey; let frontMimeType = existing.frontMimeType;
+      let backPhotoKey = existing.backPhotoKey; let backMimeType = existing.backMimeType;
+      const newKeys: string[] = [];
+      if (args.frontPhotoDataBase64 && args.frontMimeType) {
+        const bytes = Buffer.from(args.frontPhotoDataBase64, "base64"); if (bytes.byteLength > 10_000_000) throw new Error("Each document photo must be under 10 MB.");
+        frontPhotoKey = `wallet-docs/${crypto.randomUUID()}.${ext(args.frontMimeType)}`; frontMimeType = args.frontMimeType;
+        await ctx.blobs.put(frontPhotoKey, bytes, { contentType: args.frontMimeType }); newKeys.push(frontPhotoKey);
+      }
+      if (args.backPhotoDataBase64 && args.backMimeType) {
+        const bytes = Buffer.from(args.backPhotoDataBase64, "base64"); if (bytes.byteLength > 10_000_000) throw new Error("Each document photo must be under 10 MB.");
+        backPhotoKey = `wallet-docs/${crypto.randomUUID()}.${ext(args.backMimeType)}`; backMimeType = args.backMimeType;
+        await ctx.blobs.put(backPhotoKey, bytes, { contentType: args.backMimeType }); newKeys.push(backPhotoKey);
+      } else if (args.removeBackPhoto) { backPhotoKey = null; backMimeType = null; }
+      try {
+        await db.update(schema.walletDocuments).set({
+          category: args.category, name: args.name.trim(), issuingAuthority: cleanOptional(args.issuingAuthority), issueDate: args.issueDate || null,
+          expiryDate: args.expiryDate || null, notes: cleanOptional(args.notes), frontPhotoKey, frontMimeType, backPhotoKey, backMimeType, updatedAt: new Date(),
+        }).where(and(eq(schema.walletDocuments.id, args.id), eq(schema.walletDocuments.accountId, account.id)));
+      } catch (error) { await Promise.all(newKeys.map((key) => ctx.blobs.delete(key).catch(() => undefined))); throw error; }
+      if (frontPhotoKey !== existing.frontPhotoKey) await ctx.blobs.delete(existing.frontPhotoKey).catch(() => undefined);
+      if (existing.backPhotoKey && backPhotoKey !== existing.backPhotoKey) await ctx.blobs.delete(existing.backPhotoKey).catch(() => undefined);
+      ctx.invalidateQueries(); return { ok: true };
+    },
+  }),
+
+  deleteWalletDocument: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, id: z.number().int().positive() }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const db = ctx.db<typeof schema>(); const account = await requireAccount(ctx, args.sessionToken);
+      const row = (await db.select().from(schema.walletDocuments).where(and(eq(schema.walletDocuments.id, args.id), eq(schema.walletDocuments.accountId, account.id))).limit(1))[0];
+      if (!row) throw new Error("Document not found.");
+      await db.delete(schema.walletDocuments).where(and(eq(schema.walletDocuments.id, args.id), eq(schema.walletDocuments.accountId, account.id)));
+      await ctx.blobs.delete(row.frontPhotoKey).catch(() => undefined);
+      if (row.backPhotoKey) await ctx.blobs.delete(row.backPhotoKey).catch(() => undefined);
+      ctx.invalidateQueries(); return { ok: true };
     },
   }),
 
