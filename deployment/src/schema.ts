@@ -379,3 +379,12 @@ export const walletDocuments = pgTable("wallet_documents", {
 }, (table) => [
   index("wallet_documents_account_expiry_idx").on(table.accountId, table.expiryDate),
 ]);
+
+export const marketZoneSnapshots = pgTable("market_zone_snapshots", {
+  id: serial("id").primaryKey(),
+  payloadJson: text("payload_json").notNull(),
+  weekEnding: text("week_ending"),
+  fetchedAt: timestamp("fetched_at", { mode: "date", withTimezone: true }).notNull(),
+}, (table) => [
+  index("market_zone_snapshots_fetched_at_idx").on(table.fetchedAt),
+]);

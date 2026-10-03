@@ -777,6 +777,97 @@ async function fetchAaaDieselPrices(): Promise<Array<{ state: string; price: num
   }
 }
 
+function compileMarketZonesPayload(rows: UsdaReeferRow[]) {
+  const weekEnding = rows[0]?.date ? rows[0].date.slice(0, 10) : null;
+  const byRegion = new Map<string, UsdaReeferRow[]>();
+  const byDest = new Map<string, UsdaReeferRow[]>();
+  for (const row of rows) {
+    if (row.region) {
+      const list = byRegion.get(row.region) ?? [];
+      list.push(row);
+      byRegion.set(row.region, list);
+    }
+    if (row.destination) {
+      const list = byDest.get(row.destination) ?? [];
+      list.push(row);
+      byDest.set(row.destination, list);
+    }
+  }
+  const avg = (values: Array<number | null>): number | null => {
+    const valid = values.filter((v): v is number => v != null);
+    return valid.length ? Math.round((valid.reduce((a, b) => a + b, 0) / valid.length) * 100) / 100 : null;
+  };
+  const outbound = [...byRegion.entries()].map(([region, list]) => {
+    const rpms = list.map((r) => {
+      const direct = marketNum(r.rpm);
+      if (direct != null) return direct;
+      const mid = marketNum(r.midpoint);
+      const dist = marketNum(r.distance);
+      return mid != null && dist ? mid / dist : null;
+    });
+    const avgRpm = avg(rpms);
+    const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
+    const availability = avg(list.map((r) => marketNum(r.availability)));
+    const richest = [...list].sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0))[0];
+    const richestMid = richest ? marketNum(richest.midpoint) : null;
+    return {
+      region,
+      label: MARKET_REGION_LABELS[region] ?? titleCaseMarket(region),
+      heat: outboundHeat(availability, avgRpm),
+      avgRpm,
+      avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
+      availability,
+      lanes: list.length,
+      sampleLane: richest && richestMid != null ? { destination: titleCaseMarket(richest.destination ?? ""), midpoint: Math.round(richestMid) } : null,
+    };
+  }).sort((a, b) => {
+    const order = { hot: 0, warm: 1, cold: 2 } as const;
+    return order[a.heat] - order[b.heat] || (b.avgRpm ?? 0) - (a.avgRpm ?? 0);
+  });
+  const inbound = [...byDest.entries()].map(([city, list]) => {
+    const rpms = list.map((r) => {
+      const direct = marketNum(r.rpm);
+      if (direct != null) return direct;
+      const mid = marketNum(r.midpoint);
+      const dist = marketNum(r.distance);
+      return mid != null && dist ? mid / dist : null;
+    });
+    const avgRpm = avg(rpms);
+    const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
+    return {
+      city: titleCaseMarket(city),
+      heat: inboundHeat(avgRpm, avgLoad),
+      avgRpm,
+      avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
+      lanes: list.length,
+    };
+  }).sort((a, b) => {
+    const order = { hot: 0, warm: 1, cold: 2 } as const;
+    return order[a.heat] - order[b.heat] || (b.avgLoad ?? 0) - (a.avgLoad ?? 0);
+  });
+  const topLanes = [...rows]
+    .sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0))
+    .slice(0, 12)
+    .map((r) => ({
+      origin: shortOrigin(r.origin ?? ""),
+      destination: titleCaseMarket(r.destination ?? ""),
+      midpoint: marketNum(r.midpoint) != null ? Math.round(marketNum(r.midpoint) as number) : null,
+      rpm: (() => {
+        const direct = marketNum(r.rpm);
+        if (direct != null) return Math.round(direct * 100) / 100;
+        const mid = marketNum(r.midpoint);
+        const dist = marketNum(r.distance);
+        return mid != null && dist ? Math.round((mid / dist) * 100) / 100 : null;
+      })(),
+      miles: marketNum(r.distance) != null ? Math.round(marketNum(r.distance) as number) : null,
+      availability: marketNum(r.availability),
+    }));
+    return { ok: true, weekEnding, source: "USDA AgTransport", outbound, inbound, topLanes, error: null };
+}
+
+const MARKET_ZONES_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+
 export const Actions = {
   getAccountStatus: defineAction({
     request: z.object({ legacyClientId: clientIdSchema, sessionToken: sessionTokenSchema.optional() }),
@@ -3042,97 +3133,43 @@ export const Actions = {
         availability: z.number().nullable(),
       })),
       error: z.string().nullable(),
+      fetchedAt: z.string().nullable(),
+      stale: z.boolean(),
     }),
-    async handler() {
-      const rows = await fetchUsdaReeferRows();
-      if (rows.length === 0) {
-        return { ok: false, weekEnding: null, source: "USDA AgTransport", outbound: [], inbound: [], topLanes: [], error: "Live market data is temporarily unavailable. Try again in a few minutes." };
-      }
-      const weekEnding = rows[0]?.date ? rows[0].date.slice(0, 10) : null;
-      const byRegion = new Map<string, UsdaReeferRow[]>();
-      const byDest = new Map<string, UsdaReeferRow[]>();
-      for (const row of rows) {
-        if (row.region) {
-          const list = byRegion.get(row.region) ?? [];
-          list.push(row);
-          byRegion.set(row.region, list);
-        }
-        if (row.destination) {
-          const list = byDest.get(row.destination) ?? [];
-          list.push(row);
-          byDest.set(row.destination, list);
-        }
-      }
-      const avg = (values: Array<number | null>): number | null => {
-        const valid = values.filter((v): v is number => v != null);
-        return valid.length ? Math.round((valid.reduce((a, b) => a + b, 0) / valid.length) * 100) / 100 : null;
+    async handler(ctx) {
+      const db = ctx.db<typeof schema>();
+      const snapshot = (await db.select().from(schema.marketZoneSnapshots).orderBy(desc(schema.marketZoneSnapshots.fetchedAt)).limit(1))[0];
+      const snapshotAgeMs = snapshot ? Date.now() - new Date(snapshot.fetchedAt).getTime() : Number.POSITIVE_INFINITY;
+      const readSnapshot = () => {
+        if (!snapshot) return null;
+        try {
+          const decoded = JSON.parse(snapshot.payloadJson) as Record<string, unknown>;
+          if (decoded && typeof decoded === "object" && "outbound" in decoded) {
+            return {
+              ...(decoded as { ok: boolean; weekEnding: string | null; source: string; outbound: unknown[]; inbound: unknown[]; topLanes: unknown[]; error: string | null }),
+              fetchedAt: new Date(snapshot.fetchedAt).toISOString(),
+              stale: snapshotAgeMs > MARKET_ZONES_TTL_MS,
+            };
+          }
+        } catch { /* fall through to error state */ }
+        return null;
       };
-      const outbound = [...byRegion.entries()].map(([region, list]) => {
-        const rpms = list.map((r) => {
-          const direct = marketNum(r.rpm);
-          if (direct != null) return direct;
-          const mid = marketNum(r.midpoint);
-          const dist = marketNum(r.distance);
-          return mid != null && dist ? mid / dist : null;
-        });
-        const avgRpm = avg(rpms);
-        const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
-        const availability = avg(list.map((r) => marketNum(r.availability)));
-        const richest = [...list].sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0))[0];
-        const richestMid = richest ? marketNum(richest.midpoint) : null;
-        return {
-          region,
-          label: MARKET_REGION_LABELS[region] ?? titleCaseMarket(region),
-          heat: outboundHeat(availability, avgRpm),
-          avgRpm,
-          avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
-          availability,
-          lanes: list.length,
-          sampleLane: richest && richestMid != null ? { destination: titleCaseMarket(richest.destination ?? ""), midpoint: Math.round(richestMid) } : null,
-        };
-      }).sort((a, b) => {
-        const order = { hot: 0, warm: 1, cold: 2 } as const;
-        return order[a.heat] - order[b.heat] || (b.avgRpm ?? 0) - (a.avgRpm ?? 0);
-      });
-      const inbound = [...byDest.entries()].map(([city, list]) => {
-        const rpms = list.map((r) => {
-          const direct = marketNum(r.rpm);
-          if (direct != null) return direct;
-          const mid = marketNum(r.midpoint);
-          const dist = marketNum(r.distance);
-          return mid != null && dist ? mid / dist : null;
-        });
-        const avgRpm = avg(rpms);
-        const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
-        return {
-          city: titleCaseMarket(city),
-          heat: inboundHeat(avgRpm, avgLoad),
-          avgRpm,
-          avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
-          lanes: list.length,
-        };
-      }).sort((a, b) => {
-        const order = { hot: 0, warm: 1, cold: 2 } as const;
-        return order[a.heat] - order[b.heat] || (b.avgLoad ?? 0) - (a.avgLoad ?? 0);
-      });
-      const topLanes = [...rows]
-        .sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0))
-        .slice(0, 12)
-        .map((r) => ({
-          origin: shortOrigin(r.origin ?? ""),
-          destination: titleCaseMarket(r.destination ?? ""),
-          midpoint: marketNum(r.midpoint) != null ? Math.round(marketNum(r.midpoint) as number) : null,
-          rpm: (() => {
-            const direct = marketNum(r.rpm);
-            if (direct != null) return Math.round(direct * 100) / 100;
-            const mid = marketNum(r.midpoint);
-            const dist = marketNum(r.distance);
-            return mid != null && dist ? Math.round((mid / dist) * 100) / 100 : null;
-          })(),
-          miles: marketNum(r.distance) != null ? Math.round(marketNum(r.distance) as number) : null,
-          availability: marketNum(r.availability),
-        }));
-      return { ok: true, weekEnding, source: "USDA AgTransport", outbound, inbound, topLanes, error: null };
+      if (!snapshot || snapshotAgeMs > MARKET_ZONES_TTL_MS) {
+        const rows = await fetchUsdaReeferRows();
+        if (rows.length > 0) {
+          const payload = compileMarketZonesPayload(rows);
+          const fetchedAt = new Date();
+          await db.delete(schema.marketZoneSnapshots);
+          await db.insert(schema.marketZoneSnapshots).values({ payloadJson: JSON.stringify(payload), weekEnding: payload.weekEnding, fetchedAt });
+          return { ...payload, fetchedAt: fetchedAt.toISOString(), stale: false };
+        }
+        const stale = readSnapshot();
+        if (stale) return stale;
+        return { ok: false, weekEnding: null, source: "USDA AgTransport", outbound: [], inbound: [], topLanes: [], error: "Live market data is temporarily unavailable. Try again in a few minutes.", fetchedAt: null, stale: false };
+      }
+      const cached = readSnapshot();
+      if (cached) return cached;
+      return { ok: false, weekEnding: null, source: "USDA AgTransport", outbound: [], inbound: [], topLanes: [], error: "Live market data is temporarily unavailable. Try again in a few minutes.", fetchedAt: snapshot ? new Date(snapshot.fetchedAt).toISOString() : null, stale: true };
     },
   }),
 
