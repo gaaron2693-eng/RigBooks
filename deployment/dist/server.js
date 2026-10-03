@@ -706,13 +706,10 @@ var prePassColumnReady = false;
 async function ensurePrePassColumn(ctx) {
   if (prePassColumnReady)
     return;
-  try {
-    await ctx.db().run(sql.raw('ALTER TABLE "truck_profiles" ADD COLUMN "has_prepass" integer NOT NULL DEFAULT 0'));
-  } catch (error) {
-    if (!String(error).toLowerCase().includes("duplicate column"))
-      throw error;
-  }
   prePassColumnReady = true;
+  try {
+    await ctx.db().run(sql.raw('ALTER TABLE "truck_profiles" ADD COLUMN IF NOT EXISTS "has_prepass" BOOLEAN NOT NULL DEFAULT FALSE'));
+  } catch {}
 }
 function bytesToHex(bytes) {
   return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
