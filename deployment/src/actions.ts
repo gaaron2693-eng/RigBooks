@@ -2357,39 +2357,74 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof roadRouteSchema>> {
       const account = await requireAccount(ctx, args.sessionToken);
       if (!(await accountHasProAccess(ctx, account))) throw new Error("Road for Truckers requires RigRevenue Pro.");
-      
+      await ensurePrePassColumn(ctx);
       const truck = (await ctx.db<typeof schema>().select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
       if (!truck) throw new Error("Add your truck profile before planning a route.");
+      const fetchWithTimeout = async (url: string | URL, init: RequestInit, ms = 15_000): Promise<Response> => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), ms);
+        try {
+          return await fetch(url, { ...init, signal: controller.signal });
+        } finally {
+          clearTimeout(timer);
+        }
+      };
       const geocode = async (query: string) => {
-        // If query is already "lat,lng" coordinates, parse directly (from Use live GPS)
-        const coordMatch = query.trim().match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
-        if (coordMatch) {
-          const lat = Number(coordMatch[1]);
-          const lng = Number(coordMatch[2]);
-          if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
-            return { lat, lng, label: query.trim() };
-          }
+        const coordinateMatch = query.match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
+        if (coordinateMatch) {
+          const lat = Number(coordinateMatch[1]); const lng = Number(coordinateMatch[2]);
+          if (Number.isFinite(lat) && lat >= -90 && lat <= 90 && Number.isFinite(lng) && lng >= -180 && lng <= 180) return { lat, lng, label: query };
         }
         const url = new URL("https://nominatim.openstreetmap.org/search"); url.searchParams.set("q", query); url.searchParams.set("format", "jsonv2"); url.searchParams.set("limit", "1");
-        const response = await fetch(url, { headers: { "User-Agent": "RigRevenue/1.0" } });
-        if (!response.ok) throw new Error("A route location could not be found.");
+        let response: Response;
+        try {
+          response = await fetchWithTimeout(url, { headers: { "User-Agent": "RigRevenue/1.0" } });
+        } catch (error) {
+          console.error("[planRoadForTruckers] geocode network/timeout failure", { query, error: error instanceof Error ? error.message : String(error).slice(0, 200) });
+          throw new Error("Could not find one of the locations.");
+        }
+        if (!response.ok) {
+          console.error("[planRoadForTruckers] geocode HTTP failure", { query, status: response.status });
+          throw new Error("Could not find one of the locations.");
+        }
         const rows = await response.json() as Array<{ lat?: string; lon?: string; display_name?: string }>;
         const row = rows[0]; const lat = Number(row?.lat); const lng = Number(row?.lon);
-        if (!Number.isFinite(lat) || !Number.isFinite(lng)) throw new Error("A route location could not be found.");
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+          console.error("[planRoadForTruckers] geocode no result", { query });
+          throw new Error("Could not find one of the locations.");
+        }
         return { lat, lng, label: row?.display_name ?? query };
       };
       const [origin, destination] = await Promise.all([geocode(args.origin), geocode(args.destination)]);
-      const routeResponse = await fetch("https://valhalla1.openstreetmap.de/route", { method: "POST", headers: { "Content-Type": "application/json", "X-Client-Id": "rigrevenue", "User-Agent": "RigRevenue/1.0" }, body: JSON.stringify({ locations: [{ lat: origin.lat, lon: origin.lng }, { lat: destination.lat, lon: destination.lng }], costing: "truck", costing_options: { truck: { height: truck.heightInches * 0.0254, width: truck.widthInches * 0.0254, length: truck.lengthFeet * 0.3048, weight: truck.weightPounds * 0.000453592, axle_load: Math.min(20, truck.weightPounds * 0.000453592 / 5), hazmat: truck.hazmat ?? false } }, units: "miles", language: "en-US" }) });
-      if (!routeResponse.ok) throw new Error("A truck-safe route could not be calculated right now.");
-      const routeData = await routeResponse.json() as { trip?: { summary?: { length?: number; time?: number }; legs?: Array<{ shape?: string; maneuvers?: Array<{ instruction?: string; length?: number; time?: number }> }> } };
+      const valhallaRequest: RequestInit = { method: "POST", headers: { "Content-Type": "application/json", "X-Client-Id": "rigrevenue", "User-Agent": "RigRevenue/1.0" }, body: JSON.stringify({ locations: [{ lat: origin.lat, lon: origin.lng }, { lat: destination.lat, lon: destination.lng }], costing: "truck", costing_options: { truck: { height: truck.heightInches * 0.0254, width: truck.widthInches * 0.0254, length: truck.lengthFeet * 0.3048, weight: truck.weightPounds * 0.000453592, axle_load: Math.min(20, truck.weightPounds * 0.000453592 / 5), hazmat: truck.hazmat ?? false } }, units: "miles", language: "en-US" }) };
+      let routeResponse: Response | null = null;
+      let lastStatus: number | null = null;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const attemptResponse = await fetchWithTimeout("https://valhalla1.openstreetmap.de/route", valhallaRequest);
+          if (attemptResponse.ok) { routeResponse = attemptResponse; break; }
+          lastStatus = attemptResponse.status;
+          console.error("[planRoadForTruckers] valhalla attempt failed", { attempt, status: attemptResponse.status });
+        } catch (error) {
+          console.error("[planRoadForTruckers] valhalla attempt error", { attempt, error: (error instanceof Error ? error.message : String(error)).slice(0, 200) });
+        }
+        if (attempt === 1) await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+      if (!routeResponse) throw new Error(`Truck routing service is temporarily unavailable${lastStatus ? ` (status ${lastStatus})` : ""}. Try again in a minute.`);
+      const routeData = await routeResponse.json() as { trip?: { summary?: { length?: number; time?: number }; legs?: Array<{ shape?: string; maneuvers?: Array<{ instruction?: string; type?: number; length?: number; time?: number; begin_shape_index?: number; end_shape_index?: number }> }> } };
       const leg = routeData.trip?.legs?.[0]; const summary = routeData.trip?.summary;
-      if (!leg?.shape || typeof summary?.length !== "number" || typeof summary.time !== "number") throw new Error("A truck-safe route could not be calculated right now.");
-      const fullShape = decodePolyline6(leg.shape); const step = Math.max(1, Math.ceil(fullShape.length / 300)); const shape = fullShape.filter((_, index) => index % step === 0);
+      if (!leg?.shape || typeof summary?.length !== "number" || typeof summary.time !== "number") {
+        console.error("[planRoadForTruckers] valhalla returned unusable trip", { hasLeg: !!leg, hasSummary: !!summary });
+        throw new Error("A truck-safe route could not be calculated right now.");
+      }
+      const fullShape = decodePolyline6(leg.shape); const step = Math.max(1, Math.ceil(fullShape.length / 8000)); const shape = fullShape.filter((_, index) => index % step === 0);
+      const finalPoint = fullShape[fullShape.length - 1];
+      if (finalPoint && shape[shape.length - 1] !== finalPoint) shape.push(finalPoint);
       const midpoint = shape[Math.floor(shape.length / 2)] ?? origin;
       const around = `(around:50000,${midpoint.lat},${midpoint.lng})`;
       const overpassQuery = `[out:json][timeout:20];(nwr["amenity"="truck_stop"]${around};nwr["amenity"="weighbridge"]["brand"~"CAT",i]${around};nwr["amenity"="weighbridge"]["name"~"CAT Scale",i]${around};);out center tags;`;
       let elements: OverpassElement[] = [];
-      try { const response = await fetch("https://overpass-api.de/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigRevenue/1.0" }, body: new URLSearchParams({ data: overpassQuery }) }); if (response.ok) elements = ((await response.json()) as { elements?: OverpassElement[] }).elements ?? []; } catch { elements = []; }
+      try { const response = await fetchWithTimeout("https://overpass-api.de/api/interpreter", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "RigRevenue/1.0" }, body: new URLSearchParams({ data: overpassQuery }) }); if (response.ok) elements = ((await response.json()) as { elements?: OverpassElement[] }).elements ?? []; } catch (error) { console.error("[planRoadForTruckers] overpass truck-stop lookup failed (non-blocking)", { error: (error instanceof Error ? error.message : String(error)).slice(0, 200) }); elements = []; }
       const truckStops = elements.flatMap((element) => {
         const lat = element.lat ?? element.center?.lat; const lng = element.lon ?? element.center?.lon; if (typeof lat !== "number" || typeof lng !== "number") return [];
         const nearest = shape.filter((_, index) => index % 10 === 0).reduce((best, point) => Math.min(best, distanceMiles(point.lat, point.lng, lat, lng)), Number.POSITIVE_INFINITY);
@@ -2398,7 +2433,7 @@ export const Actions = {
         const address = [tags["addr:housenumber"], tags["addr:street"], tags["addr:city"], tags["addr:state"]].filter(Boolean).join(" ") || null;
         return [{ id: `${element.type ?? "node"}-${element.id ?? `${lat}-${lng}`}`, name: tags.name || tags.brand || (isCat ? "CAT Scale" : "Truck stop"), category, address, lat, lng, distanceMiles: Math.round(nearest * 10) / 10 }];
       }).sort((a, b) => a.distanceMiles - b.distanceMiles).slice(0, 12);
-      return { originLabel: origin.label, destinationLabel: destination.label, distanceMiles: Math.round(summary.length * 10) / 10, durationMinutes: Math.round(summary.time / 60), shape, maneuvers: (leg.maneuvers ?? []).map((item) => ({ instruction: item.instruction ?? "Continue", maneuverType: Number.isFinite(item.type) ? Math.trunc(item.type ?? 0) : 0, distanceMiles: Math.round((item.length ?? 0) * 10) / 10, timeMinutes: Math.max(1, Math.round((item.time ?? 0) / 60)) })), truckStops, attribution: "Route and place data © OpenStreetMap contributors" };
+      return { originLabel: origin.label, destinationLabel: destination.label, destinationLat: destination.lat, destinationLng: destination.lng, distanceMiles: Math.round(summary.length * 10) / 10, durationMinutes: Math.round(summary.time / 60), shape, maneuvers: (leg.maneuvers ?? []).map((item) => ({ instruction: item.instruction ?? "Continue", maneuverType: Number.isFinite(item.type) ? Math.trunc(item.type ?? 0) : 0, distanceMiles: Math.round((item.length ?? 0) * 10) / 10, timeMinutes: Math.max(1, Math.round((item.time ?? 0) / 60)), beginShapeIndex: Math.max(0, Math.floor((item.begin_shape_index ?? 0) / step)), endShapeIndex: Math.min(Math.max(0, shape.length - 1), Math.ceil((item.end_shape_index ?? item.begin_shape_index ?? 0) / step)) })), truckStops, attribution: "Routing and road data © OpenStreetMap contributors" };
     },
   }),
 
