@@ -2606,6 +2606,14 @@ var Actions = {
       if (!truck)
         throw new Error("Add your truck profile before planning a route.");
       const geocode = async (query) => {
+        const coordMatch = query.trim().match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
+        if (coordMatch) {
+          const lat = Number(coordMatch[1]);
+          const lng = Number(coordMatch[2]);
+          if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+            return { lat, lng, label: query.trim() };
+          }
+        }
         const url = new URL("https://nominatim.openstreetmap.org/search");
         url.searchParams.set("q", query);
         url.searchParams.set("format", "jsonv2");
