@@ -344,3 +344,14 @@ export const communityRatings = pgTable("community_ratings", {
   index("community_ratings_entity_lookup_idx").on(table.entityType, table.normalizedName),
   index("community_ratings_updated_at_idx").on(table.updatedAt),
 ]);
+
+export const yardModerationLogs = pgTable("yard_moderation_logs", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").references(() => accounts.id, { onDelete: "set null" }),
+  driverName: text("driver_name").notNull(),
+  postBody: text("post_body").notNull(),
+  hadImage: boolean("had_image").notNull().default(false),
+  category: text("category", { enum: ["hate_speech", "explicit_sexual", "spam"] }).notNull(),
+  reason: text("reason").notNull(),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [index("yard_moderation_logs_created_at_idx").on(table.createdAt)]);
