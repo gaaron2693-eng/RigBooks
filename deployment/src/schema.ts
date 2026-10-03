@@ -322,3 +322,23 @@ export const detentionClaims = pgTable("detention_claims", {
 }, (table) => [
   index("detention_claims_account_created_idx").on(table.accountId, table.createdAt),
 ]);
+
+export const communityRatings = pgTable("community_ratings", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  entityType: text("entity_type", { enum: ["broker", "shipper", "receiver"] }).notNull(),
+  entityName: text("entity_name").notNull(),
+  normalizedName: text("normalized_name").notNull(),
+  detentionScore: integer("detention_score"),
+  paymentScore: integer("payment_score"),
+  honestyScore: integer("honesty_score"),
+  waitScore: integer("wait_score"),
+  treatmentScore: integer("treatment_score"),
+  comment: text("comment"),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+  updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
+}, (table) => [
+  uniqueIndex("community_ratings_account_entity_unique").on(table.accountId, table.entityType, table.normalizedName),
+  index("community_ratings_entity_lookup_idx").on(table.entityType, table.normalizedName),
+  index("community_ratings_updated_at_idx").on(table.updatedAt),
+]);

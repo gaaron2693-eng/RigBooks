@@ -163,6 +163,20 @@ const detentionClaimSchema = z.object({
   totalWaitMinutes: z.number(), billableMinutes: z.number(), billableHours: z.number(), amountOwed: z.number(),
   createdAt: z.string(),
 });
+const yardEntityTypeSchema = z.enum(["broker", "shipper", "receiver"]);
+const yardRatingDetailSchema = z.object({
+  detention: z.number().nullable(), payment: z.number().nullable(), honesty: z.number().nullable(),
+  wait: z.number().nullable(), treatment: z.number().nullable(),
+});
+const yardScoreItemSchema = z.object({
+  entityType: yardEntityTypeSchema,
+  entityName: z.string(),
+  ratingCount: z.number(),
+  overall: z.number(),
+  details: yardRatingDetailSchema,
+  myRating: yardRatingDetailSchema.nullable(),
+  updatedAt: z.string(),
+});
 const companyProfileSchema = z.object({
   companyName: z.string(), address: z.string().nullable(), phone: z.string().nullable(),
   email: z.string().nullable(), ein: z.string().nullable(), mcNumber: z.string().nullable(),
@@ -447,6 +461,10 @@ function toDetentionClaim(
     amountOwed: Math.round(billableMinutes * row.hourlyRateCents / 60) / 100,
     createdAt: row.createdAt.toISOString(),
   };
+}
+
+function normalizeYardBusinessName(value: string): string {
+  return value.trim().toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
 async function loadCompanyProfile(ctx: Ctx, sessionToken: string): Promise<z.infer<typeof companyProfileSchema>> {
@@ -2009,6 +2027,85 @@ export const Actions = {
       await db.insert(schema.driverPostLikes).values({ postId: args.postId, accountId: account.id });
       ctx.invalidateQueries();
       return { liked: true };
+    },
+  }),
+
+  listYardScoreboard: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, search: z.string().trim().max(80).default("") }),
+    response: z.object({ items: z.array(yardScoreItemSchema), totalRatings: z.number(), ratedBusinesses: z.number(), asOf: z.string() }),
+    async handler(ctx, args): Promise<{ items: Array<z.infer<typeof yardScoreItemSchema>>; totalRatings: number; ratedBusinesses: number; asOf: string }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const rows = await ctx.db<typeof schema>().select().from(schema.communityRatings).orderBy(desc(schema.communityRatings.updatedAt));
+      const groups = new Map<string, typeof rows>();
+      for (const row of rows) {
+        const key = `${row.entityType}:${row.normalizedName}`;
+        const group = groups.get(key) ?? [];
+        group.push(row);
+        groups.set(key, group);
+      }
+      const round = (value: number): number => Math.round(value * 10) / 10;
+      const average = (values: Array<number | null>): number | null => {
+        const valid = values.filter((value): value is number => value !== null);
+        return valid.length ? round(valid.reduce((sum, value) => sum + value, 0) / valid.length) : null;
+      };
+      const query = normalizeYardBusinessName(args.search);
+      const items: Array<z.infer<typeof yardScoreItemSchema>> = [];
+      for (const group of groups.values()) {
+        const newest = group[0];
+        if (!newest || (query && !newest.normalizedName.includes(query))) continue;
+        const detention = average(group.map((row) => row.detentionScore));
+        const payment = average(group.map((row) => row.paymentScore));
+        const honesty = average(group.map((row) => row.honestyScore));
+        const wait = average(group.map((row) => row.waitScore));
+        const treatment = average(group.map((row) => row.treatmentScore));
+        const scores = newest.entityType === "broker"
+          ? [detention, payment, honesty].filter((value): value is number => value !== null)
+          : [wait, treatment].filter((value): value is number => value !== null);
+        const mine = group.find((row) => row.accountId === account.id);
+        items.push({
+          entityType: newest.entityType,
+          entityName: newest.entityName,
+          ratingCount: group.length,
+          overall: scores.length ? round(scores.reduce((sum, value) => sum + value, 0) / scores.length) : 0,
+          details: { detention, payment, honesty, wait, treatment },
+          myRating: mine ? { detention: mine.detentionScore, payment: mine.paymentScore, honesty: mine.honestyScore, wait: mine.waitScore, treatment: mine.treatmentScore } : null,
+          updatedAt: newest.updatedAt.toISOString(),
+        });
+      }
+      items.sort((a, b) => b.overall - a.overall || b.ratingCount - a.ratingCount || a.entityName.localeCompare(b.entityName));
+      return { items, totalRatings: rows.length, ratedBusinesses: groups.size, asOf: new Date().toISOString() };
+    },
+  }),
+
+  saveYardRating: defineAction({
+    request: z.discriminatedUnion("entityType", [
+      z.object({ sessionToken: sessionTokenSchema, entityType: z.literal("broker"), entityName: z.string().trim().min(2).max(100), detention: z.number().int().min(1).max(5), payment: z.number().int().min(1).max(5), honesty: z.number().int().min(1).max(5) }),
+      z.object({ sessionToken: sessionTokenSchema, entityType: z.enum(["shipper", "receiver"]), entityName: z.string().trim().min(2).max(100), wait: z.number().int().min(1).max(5), treatment: z.number().int().min(1).max(5) }),
+    ]),
+    response: z.object({ id: z.number(), updated: z.boolean() }),
+    async handler(ctx, args): Promise<{ id: number; updated: boolean }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const normalizedName = normalizeYardBusinessName(args.entityName);
+      if (normalizedName.length < 2) throw new Error("Enter the broker, shipper, or receiver name.");
+      const db = ctx.db<typeof schema>();
+      const existing = (await db.select({ id: schema.communityRatings.id }).from(schema.communityRatings).where(and(
+        eq(schema.communityRatings.accountId, account.id),
+        eq(schema.communityRatings.entityType, args.entityType),
+        eq(schema.communityRatings.normalizedName, normalizedName),
+      )).limit(1))[0];
+      const values = args.entityType === "broker"
+        ? { entityName: args.entityName.trim(), normalizedName, detentionScore: args.detention, paymentScore: args.payment, honestyScore: args.honesty, waitScore: null, treatmentScore: null, updatedAt: new Date() }
+        : { entityName: args.entityName.trim(), normalizedName, detentionScore: null, paymentScore: null, honestyScore: null, waitScore: args.wait, treatmentScore: args.treatment, updatedAt: new Date() };
+      if (existing) {
+        await db.update(schema.communityRatings).set(values).where(eq(schema.communityRatings.id, existing.id));
+        ctx.invalidateQueries();
+        return { id: existing.id, updated: true };
+      }
+      const insertedRows = await db.insert(schema.communityRatings).values({ accountId: account.id, entityType: args.entityType, ...values }).returning({ id: schema.communityRatings.id });
+      const inserted = insertedRows[0];
+      if (!inserted) throw new Error("Could not save that rating.");
+      ctx.invalidateQueries();
+      return { id: inserted.id, updated: false };
     },
   }),
 
