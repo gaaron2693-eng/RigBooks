@@ -38,6 +38,7 @@ const samScopeSchema = z.enum([
   "prayer",
   "courtesy",
   "out_of_scope",
+  "ai",
 ]);
 const samResponseSchema = z.object({
   reply: z.string(),
@@ -302,12 +303,12 @@ async function getOrCreateStripeCustomer(ctx: Ctx, account: typeof schema.accoun
 let prePassColumnReady = false;
 async function ensurePrePassColumn(ctx: Ctx): Promise<void> {
   if (prePassColumnReady) return;
-  try {
-    await ctx.db<typeof schema>().run(sql.raw('ALTER TABLE "truck_profiles" ADD COLUMN "has_prepass" integer NOT NULL DEFAULT 0'));
-  } catch (error) {
-    if (!String(error).toLowerCase().includes("duplicate column")) throw error;
-  }
   prePassColumnReady = true;
+  try {
+    await ctx.db<typeof schema>().run(sql.raw('ALTER TABLE "truck_profiles" ADD COLUMN IF NOT EXISTS "has_prepass" BOOLEAN NOT NULL DEFAULT FALSE'));
+  } catch {
+    // column is managed by migration 003; safe to ignore
+  }
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -2237,78 +2238,203 @@ export const Actions = {
     response: samResponseSchema,
     async handler(ctx, args): Promise<z.infer<typeof samResponseSchema>> {
       const account = await requireAccount(ctx, args.sessionToken);
-      const courtesyText = args.message.trim().toLowerCase().replace(/[.!?]+$/g, "").trim();
-      if (/^(hello|hi|hey)( sam| there)?$/.test(courtesyText)) {
-        return { reply: "hi, how are you?", scope: "courtesy", sources: [] };
+      const text = args.message.trim();
+      const lower = text.toLowerCase().replace(/[’]/g, "'");
+      const courtesyText = lower.replace(/[.!?]+$/g, "").trim();
+      const reply = (message: string, scope: z.infer<typeof samScopeSchema>, sources: Array<{ title: string; url: string }> = []): z.infer<typeof samResponseSchema> => ({ reply: message, scope, sources });
+      const money = (value: number) => `$${value.toFixed(2)}`;
+
+      if (/^(hello|hi|hey|yo)( sam| there| bro| brodie)?$/.test(courtesyText)) {
+        return reply("Hey, driver. I'm good and ready to work—what are we figuring out?", "courtesy");
       }
-      if (/^(thanks|thank you|thx)( sam| so much| a lot)?$/.test(courtesyText)) {
-        return { reply: "you're welcome.", scope: "courtesy", sources: [] };
+      if (/^(thanks|thank you|thx|appreciate it)( sam| so much| a lot)?$/.test(courtesyText)) {
+        return reply("Anytime, driver. Keep the shiny side up.", "courtesy");
       }
 
-      const intent = await ctx.inference.complete(
-        `Classify this question for Sam the Semi, RigRevenue' in-app assistant. Choose exactly one scope: app_help (how to use RigRevenue), driver_data (the signed-in driver's loads, expenses, earnings, settlements, deductions, or profit), weather (current or forecast road weather), diesel (diesel prices), trip_planning (planning a safe, efficient truck trip or pre-trip readiness), maintenance (truck maintenance, PM timing, inspections, or mechanical care), hos (hours-of-service rules, clocks, breaks, sleeper berth, or logs), trucking_terms (definitions of trucking language, pay terms, or industry shorthand), prayer (a driver asks for a prayer or spiritual encouragement), or out_of_scope. Message: ${args.message}`,
-        { schema: samScopeSchema.exclude(["courtesy"]) },
-      );
-      if (intent === "out_of_scope") return { reply: "I can help with RigRevenue, your numbers, trip planning, maintenance, HOS, trucking terms, road weather, diesel prices, and prayers. Pick a topic above or ask me in your own words.", scope: intent, sources: [] };
-
-      let context = "";
-      let sources: Array<{ title: string; url: string }> = [];
-      let searchBackedAnswer = false;
-      if (intent === "app_help") {
-        context = `RigRevenue guide: Overview shows gross, expenses, net, miles and profit per mile. Loads logs a run manually or from a rate-con photo. Expenses stores fuel and costs with receipt images. Roadside finds truck stops, repair and rest areas. Business is for owner-operators and has load boards, IFTA, invoices, document vault, My Company and news. Driver setup holds account, membership, profile and pay defaults. Lease-purchase supports percentage or per-mile settlement pay plus weekly truck payment, maintenance escrow, insurance and other deductions. Offline entries queue on the device and sync when online.`;
-      } else if (intent === "driver_data") {
-        const db = ctx.db<typeof schema>();
-        const [loadRows, expenseRows, payRows] = await Promise.all([
-          db.select().from(schema.loads).where(eq(schema.loads.accountId, account.id)).orderBy(desc(schema.loads.deliveredOn)).limit(250),
-          db.select().from(schema.expenses).where(eq(schema.expenses.accountId, account.id)).orderBy(desc(schema.expenses.expenseDate)).limit(250),
-          db.select().from(schema.paySettings).where(eq(schema.paySettings.accountId, account.id)).limit(1),
-        ]);
-        context = `Today is ${new Date().toISOString().slice(0, 10)}. Driver pay settings: ${JSON.stringify(payRows[0] ?? null)}. Loads: ${JSON.stringify(loadRows.map((row) => ({ date: row.deliveredOn, origin: row.origin, destination: row.destination, grossPay: row.grossPayCents / 100, miles: (row.loadedMilesTenths + row.deadheadMilesTenths) / 10 })))}. Expenses: ${JSON.stringify(expenseRows.map((row) => ({ date: row.expenseDate, category: row.category, amount: row.amountCents / 100 })))}.`;
-      } else if (intent === "weather") {
-        const weather = await ctx.tool.weather(args.message, { hourly_hours: 24, location: args.lat != null && args.lng != null ? { lat: args.lat, lon: args.lng } : undefined });
-        context = `Managed current weather result: ${JSON.stringify(weather.content)}`;
-        sources = weather.content.sources.map((source) => ({ title: source.title, url: source.url }));
-      } else if (intent === "diesel") {
-        let place = "the driver's requested area";
-        if (args.lat != null && args.lng != null) {
-          try {
-            const url = new URL("https://nominatim.openstreetmap.org/reverse");
-            url.searchParams.set("lat", String(args.lat)); url.searchParams.set("lon", String(args.lng)); url.searchParams.set("format", "jsonv2");
-            const response = await fetch(url, { headers: { "User-Agent": "RigRevenue/1.0" } });
-            const data = response.ok ? await response.json() as { display_name?: string } : null;
-            place = data?.display_name ?? `${args.lat}, ${args.lng}`;
-          } catch { place = `${args.lat}, ${args.lng}`; }
+      // Fuel math is fully deterministic: miles ÷ MPG = gallons; gallons × price = cost.
+      const mpgMatch = lower.match(/(?:at|getting|average|averaging|gets?|mpg\s*(?:is|of)?|fuel economy\s*(?:is|of)?)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:mpg)?\b|\b([0-9]+(?:\.[0-9]+)?)\s*mpg\b/);
+      const milesMatch = lower.match(/\b([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:route\s*)?(?:miles?|mi)\b/);
+      const explicitPriceMatch = lower.match(/\$\s*([0-9]+(?:\.[0-9]+)?)|(?:diesel|fuel|price|per gallon)\D{0,14}([0-9]+(?:\.[0-9]+)?)/);
+      const mpg = Number((mpgMatch?.[1] ?? mpgMatch?.[2] ?? "").replace(/,/g, ""));
+      const miles = Number((milesMatch?.[1] ?? "").replace(/,/g, ""));
+      const explicitPrice = Number(explicitPriceMatch?.[1] ?? explicitPriceMatch?.[2] ?? "");
+      const twinTankMatch = lower.match(/(?:two|2)\s+(?:x\s*)?([0-9]+(?:\.[0-9]+)?)\s*(?:gallon|gal)\s*tanks?/);
+      const tankMatch = lower.match(/\b([0-9]+(?:\.[0-9]+)?)\s*(?:gallon|gal)\s*(?:tank|capacity)\b/);
+      const tankGallons = twinTankMatch ? Number(twinTankMatch[1]) * 2 : Number(tankMatch?.[1] ?? "");
+      if (/fuel math|fuel cost|trip cost|gallons? (?:will|do) i need|calculate fuel|fuel stops?|\bmpg\b/.test(lower)) {
+        if (!(miles > 0) || !(mpg > 0)) {
+          return reply("Give me the trip miles and your truck's MPG—like “850 miles at 7 MPG.” Add diesel price and tank capacity if you want total cost and a rough stop count.", "trip_planning");
         }
-        const search = await ctx.tool.web_search(`current cheapest diesel prices truck stops near or along ${place}; driver request: ${args.message}`);
-        context = `Current web search results for diesel prices: ${JSON.stringify(search)}`;
-      } else if (intent === "trip_planning") {
-        context = `Trip-planning guidance: Ask for origin, destination, delivery time, planned fuel range, and any special load limits that are missing. Direct the driver to RigRevenue Road for a truck route, route weather, truck stops, repair, rest areas, and CAT scales. Remind the driver to confirm truck dimensions in Driver setup, inspect the truck, check fuel and legal HOS availability, review weather and restrictions, and leave a time buffer. Never invent a route, mileage, restriction, or arrival time.`;
-      } else if (intent === "maintenance") {
+        const gallons = miles / mpg;
+        let price = explicitPrice > 0 ? explicitPrice : null;
+        let priceNote = "";
+        const sources: Array<{ title: string; url: string }> = [];
+        if (price == null) {
+          const dieselRows = await fetchAaaDieselPrices();
+          if (dieselRows.length > 0) {
+            price = dieselRows.reduce((sum, row) => sum + row.price, 0) / dieselRows.length;
+            priceNote = ` using the current ${money(price)} app average`;
+            sources.push({ title: "AAA state gas price averages", url: AAA_DIESEL_URL });
+          }
+        }
+        const costLine = price != null ? ` Estimated fuel cost: ${money(gallons * price)}${priceNote}.` : " Add your diesel price for the cost.";
+        const rangeLine = tankGallons > 0
+          ? ` A ${tankGallons.toFixed(0)}-gallon capacity gives about ${(tankGallons * mpg).toFixed(0)} miles of theoretical range, so figure roughly ${Math.max(0, Math.ceil(gallons / tankGallons) - 1)} fuel stop(s) if you leave full—plan earlier for reserve.`
+          : " Tell me your usable tank capacity if you want a rough fuel-stop count.";
+        return reply(`${miles.toLocaleString()} miles ÷ ${mpg.toFixed(1)} MPG = ${gallons.toFixed(1)} gallons.${costLine}${rangeLine}`, "trip_planning", sources);
+      }
+
+      if (/hours? of service|\bhos\b|14[- ]?hour|11[- ]?hour|70[- /]?8|70 hour|30[- ]?minute|sleeper|split berth|recap|34[- ]?hour reset/.test(lower)) {
+        if (/sleeper|split berth|7\s*\/\s*3|8\s*\/\s*2/.test(lower)) {
+          return reply("For a property-carrying driver, a qualifying sleeper split can be 7/3 or 8/2. One period must be at least 7 consecutive hours in the sleeper berth; the other must be at least 2 consecutive hours off duty, sleeper, or a combination. Together they must total at least 10 hours. When paired correctly, neither qualifying period counts against the 14-hour window. Order matters less than meeting both parts. Check your exact operation and exceptions with your carrier or FMCSA.", "hos");
+        }
+        if (/30[- ]?minute|break/.test(lower)) return reply("After 8 cumulative hours of driving without at least a 30-minute interruption, you need a 30-minute break before driving again. The break can be off duty, sleeper berth, on duty not driving, or a qualifying combination. It is based on driving time—not 8 hours since you clocked in. Verify exceptions for your operation.", "hos");
+        if (/14[- ]?hour/.test(lower)) return reply("Your 14-hour window starts when you come on duty after 10 consecutive hours off. You may drive only inside that window, and ordinary off-duty breaks do not pause it. Once the 14 hours are up, you need another qualifying 10-hour break before driving again. A properly paired sleeper split can change the calculation.", "hos");
+        if (/11[- ]?hour/.test(lower)) return reply("You may drive up to 11 hours after 10 consecutive hours off duty, but only inside the 14-hour duty window. Hitting either limit means no more driving until you take a qualifying break. On-duty, not-driving work does not use the 11, but it still burns the 14.", "hos");
+        if (/70[- /]?8|70 hour|cycle|recap|34[- ]?hour/.test(lower)) return reply("The 70-hour/8-day limit means you cannot drive after reaching 70 on-duty hours across 8 consecutive days. Hours can return as old days roll off—your recap—or you can reset the cycle with at least 34 consecutive hours off duty. Some operations use 60 hours in 7 days instead, so confirm your carrier's cycle.", "hos");
+        return reply("Property-carrying basics: up to 11 driving hours after 10 consecutive hours off; driving must fit inside the 14-hour window; a 30-minute interruption is due after 8 cumulative driving hours; and most 7-day operations use a 70-hour/8-day cycle. A qualifying 7/3 or 8/2 sleeper split can pause parts of the 14-hour calculation. These are general federal rules—exceptions and state-only work can differ.", "hos");
+      }
+
+      if (/market zone|market rates?|freight rates?|reefer rates?|top lanes?|hot market|cold market/.test(lower)) {
+        const rows = await fetchUsdaReeferRows();
+        if (rows.length === 0) return reply("I couldn't pull the Market Zone feed right now. Open Market Zone and tap refresh in a minute. I won't guess at a rate.", "driver_data");
+        const queryWords = lower.split(/[^a-z]+/).filter((word) => word.length >= 4 && !["market", "rates", "rate", "right", "show", "lane", "lanes", "what", "from", "into"].includes(word));
+        const matching = rows.filter((row) => queryWords.some((word) => `${row.region ?? ""} ${row.origin ?? ""} ${row.destination ?? ""}`.toLowerCase().includes(word)));
+        const pool = matching.length > 0 ? matching : rows;
+        const top = [...pool].sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0)).slice(0, 3);
+        const lines = top.map((row) => {
+          const midpoint = marketNum(row.midpoint);
+          const rpm = marketNum(row.rpm) ?? (midpoint != null && marketNum(row.distance) ? midpoint / (marketNum(row.distance) as number) : null);
+          return `${shortOrigin(row.origin ?? row.region ?? "Origin")} → ${titleCaseMarket(row.destination ?? "Destination")}: ${midpoint != null ? money(midpoint) : "rate unavailable"}${rpm != null ? ` (${money(rpm)}/mi)` : ""}`;
+        });
+        const week = rows[0]?.date?.slice(0, 10) ?? "latest week";
+        return reply(`Latest USDA reefer snapshot (${week}):\n${lines.join("\n")}\nThese are weekly reefer lane reports, not a live load-board quote. Open Market Zone for inbound/outbound heat and more lanes.`, "driver_data", [{ title: "USDA AgTransport refrigerated truck rates", url: USDA_REEFER_URL }]);
+      }
+
+      if (/diesel price|fuel price|cheapest diesel|price of diesel/.test(lower)) {
+        const rows = await fetchAaaDieselPrices();
+        if (rows.length === 0) return reply("The app's diesel feed isn't answering right now. Open Diesel Prices and tap refresh in a minute—I won't make up a number.", "diesel");
+        const state = rows.find((row) => lower.includes(row.state.toLowerCase()));
+        if (state) return reply(`${state.state} diesel is ${money(state.price)} per gallon in the app's current AAA state average. Open Diesel Prices for the full state list. Station prices can differ.`, "diesel", [{ title: "AAA state gas price averages", url: AAA_DIESEL_URL }]);
+        const cheapest = [...rows].sort((a, b) => a.price - b.price).slice(0, 3);
+        const average = rows.reduce((sum, row) => sum + row.price, 0) / rows.length;
+        return reply(`The app average is ${money(average)}/gal. Lowest state averages in this pull: ${cheapest.map((row) => `${row.state} ${money(row.price)}`).join(", ")}. Open Diesel Prices for every state. These are state averages, not a station quote.`, "diesel", [{ title: "AAA state gas price averages", url: AAA_DIESEL_URL }]);
+      }
+
+      if (/weigh station|cat scale|axle weight|tandem|steer axle|drive axle|gross weight|prepass/.test(lower)) {
+        return reply("Use Weight for steer, drive, and trailer axle math—it will tell you which way to slide the tandems. Use Road for Truckers to find CAT scales and truck stops along a route. Your PrePass setting lives in Driver Setup and shows your enrollment status; bypass decisions still come from the roadside system, not RigRevenue. Always follow posted signs and an officer's direction.", "app_help");
+      }
+
+      if (/detention|held at|waiting at (?:shipper|receiver)|free time|layover pay/.test(lower)) {
+        return reply("Open Detention from Home or More. Stamp arrival and departure, enter the agreed free time and hourly rate, and keep the appointment, rate con, BOL/POD, check-in messages, and any facility notes. RigRevenue calculates the billable wait and builds the invoice record. Confirm the broker's detention terms before you submit it—detention and layover are not the same thing.", "app_help");
+      }
+
+      if (/logbook|log book|edit (?:my )?log|certif(?:y|ication)|dvir|duty status|drive time/.test(lower)) {
+        return reply("Go to HOS, then Log editing. You can correct off-duty, sleeper, and on-duty entries with a required reason; RigRevenue preserves the original. Drive time is locked and cannot be edited. Review the full day, add notes where needed, then use daily certification. DVIR is in the same HOS area for pre-trip, post-trip, defects, and repair sign-off.", "app_help");
+      }
+
+      if (/truck gps|\bgps\b|navigation|navigate|truck route|low bridge|truck profile|dimensions/.test(lower)) {
+        return reply("Go to Road for Truckers → Set up your truck. Save height, gross weight, total length, and width, then tap Navigate. The truck router uses those limits to avoid known low-clearance, restricted, and unsuitable roads; ordinary car GPS does not. Keep dimensions exact, obey posted signs, and never treat any map as permission past a restriction. Truck navigation is a Pro feature.", "app_help");
+      }
+
+      const terms: Array<{ pattern: RegExp; answer: string }> = [
+        { pattern: /deadhead/, answer: "Deadhead is miles driven without a paying load—like running empty to pickup or heading home after delivery. Count it in total miles because it still burns fuel, time, and truck life." },
+        { pattern: /accessorial/, answer: "Accessorials are extra charges beyond linehaul, such as detention, layover, stop-off, lumper reimbursement, truck-ordered-not-used, or driver assist." },
+        { pattern: /linehaul/, answer: "Linehaul is the base pay for moving the freight from origin to destination. Fuel surcharge and accessorials are normally separate." },
+        { pattern: /\btonu\b|truck ordered not used/, answer: "TONU means Truck Ordered Not Used: compensation when the truck is dispatched or arrives but the load cancels. The rate con or broker agreement decides the amount." },
+        { pattern: /\blumper\b/, answer: "A lumper is a third-party worker or service that loads or unloads freight, often at a grocery warehouse. Keep the receipt if the broker will reimburse it." },
+        { pattern: /rate con|rate confirmation/, answer: "A rate confirmation is the written deal for the load: parties, lane, appointments, freight, rate, and accessorial terms. Read it before rolling and save the signed copy." },
+        { pattern: /\bbol\b|bill of lading/, answer: "BOL means Bill of Lading—the shipment document describing the freight, shipper, receiver, and handling details. Check it before leaving pickup and note damage or count issues." },
+        { pattern: /\bpod\b|proof of delivery/, answer: "POD means Proof of Delivery—the signed delivery document showing the freight was received. A clean, readable POD is usually needed to invoice the load." },
+        { pattern: /factoring/, answer: "Factoring is selling an invoice to a factoring company for faster cash. They pay you minus a fee, then collect from the customer; recourse terms decide who carries nonpayment risk." },
+        { pattern: /bobtail/, answer: "Bobtail means driving the tractor without a trailer. It is not the same as deadhead, which can include pulling an empty trailer." },
+        { pattern: /drop and hook/, answer: "Drop-and-hook means leaving one trailer and picking up another instead of waiting for live loading or unloading." },
+        { pattern: /live load|live unload/, answer: "Live load or live unload means you stay connected—or remain on site—while the facility loads or unloads your trailer. Watch the clock for detention terms." },
+        { pattern: /profit per mile|\bppm\b/, answer: "Profit per mile is net profit divided by every mile, loaded plus deadhead. It tells you what the truck actually kept per mile after costs." },
+      ];
+      const matchedTerms = terms.filter((term) => term.pattern.test(lower)).slice(0, 4);
+      if (/trucking term|define|what (?:does|is|are)|meaning|mean\b/.test(lower) || matchedTerms.length > 0) {
+        if (matchedTerms.length > 0) return reply(matchedTerms.map((term) => term.answer).join("\n\n"), "trucking_terms");
+        return reply("I know common trucking terms like deadhead, detention, linehaul, accessorial, lumper, rate con, BOL, POD, TONU, factoring, bobtail, drop-and-hook, and live load. Ask me the exact term and I'll break it down plain.", "trucking_terms");
+      }
+
+      if (/prayer|pray|blessing/.test(lower)) {
+        if (/family|home/.test(lower)) return reply("Lord, watch over my family while I'm away. Give us patience, peace, and the comfort of knowing we're carrying this road together. Bring me home with a grateful heart. Amen.", "prayer");
+        if (/after|arriv|made it|safe run/.test(lower)) return reply("Lord, thank You for carrying me safely through this run. Give me real rest, keep my family close, and help me meet the next mile with patience and wisdom. Amen.", "prayer");
+        return reply("Lord, guide this driver with a clear mind, patient hands, and wise decisions. Watch over the road, the truck, everyone nearby, and the family waiting at home. Bring them through this run safely and in peace. Amen.", "prayer");
+      }
+
+      if (/maintenance|\bpm\b|preventive|oil change|service due|pre[- ]?trip|post[- ]?trip|tire|brake|coolant/.test(lower)) {
         await ensurePrePassColumn(ctx);
         const truck = (await ctx.db<typeof schema>().select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
-        context = truck
-          ? `RigRevenue truck profile: ${JSON.stringify({ truckName: truck.truckName, currentOdometer: truck.currentOdometerTenths / 10, lastPmOdometer: truck.lastPmOdometerTenths / 10, pmInterval: truck.pmIntervalTenths / 10, nextPmDue: (truck.lastPmOdometerTenths + truck.pmIntervalTenths) / 10 })}. Explain preventive care clearly. Do not diagnose a dangerous mechanical problem remotely; advise stopping safely and using a qualified mechanic when safety may be affected.`
-          : `No truck maintenance profile is saved yet. Explain how to add current odometer, last PM odometer, and PM interval in Driver setup. Give only general preventive-maintenance guidance and do not diagnose a dangerous mechanical problem remotely; advise stopping safely and using a qualified mechanic when safety may be affected.`;
-      } else if (intent === "hos") {
-        const search = await ctx.tool.web_search(`current official FMCSA hours of service rules property-carrying commercial drivers; driver question: ${args.message}`);
-        context = `Current web search results about federal HOS rules: ${JSON.stringify(search)}`;
-        searchBackedAnswer = true;
-      } else if (intent === "trucking_terms") {
-        context = `Explain trucking terminology in plain driver language. Common RigRevenue-relevant terms include deadhead (unpaid or non-revenue miles driven without a load), detention (time held beyond an agreed free period), lumper (a third-party loading or unloading service), rate confirmation (the written load terms and agreed carrier pay), gross (money before expenses or deductions), net (money after expenses or deductions), and profit per mile (net divided by all miles). If asked about a term not safely known, say so rather than guessing.`;
-      } else if (intent === "prayer") {
-        context = `Offer a brief, sincere Christian prayer suitable for a truck driver. Match the requested moment—before a trip, after a safe arrival, for family at home, during stress, or at bedtime. Do not claim guaranteed protection or outcomes. Keep it warm and respectful.`;
+        if (/pre[- ]?trip|inspection/.test(lower)) return reply("Before rolling: inspect tires and wheels, brakes and air lines, lights and reflectors, coupling and fifth wheel, fluids and leaks, steering, mirrors and glass, wipers, horn, emergency gear, load securement, and trailer doors. Do a brake test, verify paperwork, and record defects in HOS → DVIR. If a safety item is questionable, park it and get it checked.", "maintenance");
+        if (truck) {
+          const current = truck.currentOdometerTenths / 10;
+          const next = (truck.lastPmOdometerTenths + truck.pmIntervalTenths) / 10;
+          const remaining = next - current;
+          return reply(`${truck.truckName}: current odometer ${current.toLocaleString()} mi; next PM target ${next.toLocaleString()} mi. ${remaining <= 0 ? `You're ${Math.abs(remaining).toLocaleString()} miles past that target—schedule it now.` : `${remaining.toLocaleString()} miles remain.`} Update the odometer in Driver Setup after each run.`, "maintenance");
+        }
+        return reply("Add your truck, current odometer, last PM mileage, and service interval in Driver Setup. Then I can calculate your next PM. For any brake, steering, tire, coupling, leak, or warning-light concern, stop safely and use a qualified mechanic—I won't guess at a safety diagnosis.", "maintenance");
       }
 
-      const prompt = `You are Sam the Semi, a friendly, concise, trucker-aware assistant inside RigRevenue. Answer only within the selected scope: ${intent}. Use the supplied context only; do not invent values, prices, conditions, routes, rules, or app behavior. For driver data, calculate exactly from the rows and clearly state the date range used. For diesel, include specific stations and prices only when the search context explicitly supports them; otherwise say live prices were not available and suggest trying a route or current location. For weather, emphasize hazards relevant to driving. For HOS, make clear that the answer is general guidance, use the current search context, and tell the driver to verify their operation and exceptions with FMCSA or their carrier. Keep the answer under 140 words. Conversation: ${JSON.stringify(args.history)}. Driver question: ${args.message}. Context: ${context}`;
-      if (searchBackedAnswer) {
-        const result = await ctx.inference.complete(
-          `${prompt} Return up to three useful source links only when their complete URLs appear verbatim in the search context; otherwise return no sources.`,
-          { schema: z.object({ reply: z.string(), sources: z.array(z.object({ title: z.string(), url: z.string().url() })).max(3) }) },
-        );
-        return { reply: result.reply, scope: intent, sources: result.sources };
+      if (/how much did i|my (?:loads|expenses|earnings|profit|settlement)|this week|this month/.test(lower)) {
+        const db = ctx.db<typeof schema>();
+        const [loadRows, expenseRows] = await Promise.all([
+          db.select().from(schema.loads).where(eq(schema.loads.accountId, account.id)).orderBy(desc(schema.loads.deliveredOn)).limit(500),
+          db.select().from(schema.expenses).where(eq(schema.expenses.accountId, account.id)).orderBy(desc(schema.expenses.expenseDate)).limit(500),
+        ]);
+        const now = new Date();
+        const start = new Date(now);
+        const rangeLabel = /this month/.test(lower) ? "this month" : "the last 7 days";
+        if (/this month/.test(lower)) start.setUTCDate(1); else start.setUTCDate(start.getUTCDate() - 6);
+        const startKey = start.toISOString().slice(0, 10);
+        const filteredLoads = loadRows.filter((row) => row.deliveredOn >= startKey);
+        const filteredExpenses = expenseRows.filter((row) => row.expenseDate >= startKey);
+        const gross = filteredLoads.reduce((sum, row) => sum + row.grossPayCents, 0) / 100;
+        const expenses = filteredExpenses.reduce((sum, row) => sum + row.amountCents, 0) / 100;
+        const totalMiles = filteredLoads.reduce((sum, row) => sum + row.loadedMilesTenths + row.deadheadMilesTenths, 0) / 10;
+        return reply(`For ${rangeLabel} (${startKey} through today): ${filteredLoads.length} load(s), ${totalMiles.toLocaleString()} total miles, ${money(gross)} gross, ${money(expenses)} in saved expenses, and ${money(gross - expenses)} before any deductions not entered as expenses.`, "driver_data");
       }
-      const answer = await ctx.inference.complete(prompt, { schema: z.string() });
-      return { reply: answer, scope: intent, sources };
+
+      if (/log a load|deadhead miles|log expense|receipt|business tools?|where (?:do|is)|rigrevenue|app help/.test(lower)) {
+        if (/load|deadhead/.test(lower)) return reply("Open Loads → Add load. Enter pickup, dropoff, loaded miles, deadhead miles, rate, and delivery date. RigRevenue uses loaded plus deadhead miles for the real per-mile math. You can also scan a rate con to prefill the load, then review it before saving.", "app_help");
+        if (/expense|receipt/.test(lower)) return reply("Open Expenses → Add expense. Pick the category, amount, date, and optional gallons or state, then attach the receipt photo. Fuel, tolls, maintenance, insurance, truck payments, and other costs all feed your net.", "app_help");
+        return reply("Main tools: Home for profit and shortcuts; HOS for clocks, DVIR, and log editing; Loads and Expenses for the ledger; The Yard for drivers and broker ratings; Weight for axle math; Road for truck GPS; Market Zone and Diesel Prices for current app feeds; More for business tools and settings.", "app_help");
+      }
+
+      if (/trip plan|plan (?:a|my|the) trip|before i roll|route plan|safe trip/.test(lower)) {
+        return reply("Build it in this order: 1) confirm pickup, delivery, and appointment time; 2) open Road for Truckers and route with your exact truck dimensions; 3) compare trip miles with legal HOS left; 4) place fuel, scale, rest, and parking stops; 5) check weather and restrictions; 6) do the pre-trip and leave a buffer. Give me your miles, MPG, tank size, and diesel price and I'll run the fuel math too.", "trip_planning");
+      }
+
+      if (/weather|forecast|storm|wind|snow|ice|rain/.test(lower)) {
+        return reply("For live road weather, open Road for Truckers and enter the route so conditions match where the truck is going. I can help you turn that into a stop plan, but I won't invent a forecast without the live road feed.", "weather");
+      }
+
+      // OpenAI fallback for open-ended questions
+      const openaiKey = process.env.OPENAI_API_KEY;
+      if (openaiKey && openaiKey.startsWith("sk-")) {
+        try {
+          const messages = [
+            { role: "system", content: "You are Sam the Semi, a friendly trucker AI assistant in the RigRevenue app. You help truck drivers with anything they ask — trucking questions, general knowledge, math, advice, whatever. Be warm, plain-spoken, a little playful, and use trucker language naturally. Keep answers concise and useful. If you don't know something, say so honestly." },
+            ...args.history.slice(-6).map(h => ({ role: h.role, content: h.content })),
+            { role: "user", content: text },
+          ];
+          const aiResp = await fetch("https://api.openai.com/v1/chat/completions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + openaiKey },
+            body: JSON.stringify({ model: "gpt-4o-mini", messages, max_tokens: 500, temperature: 0.7 }),
+          });
+          if (aiResp.ok) {
+            const aiData = await aiResp.json() as { choices?: Array<{ message?: { content?: string } }> };
+            const aiText = aiData.choices?.[0]?.message?.content?.trim();
+            if (aiText) return reply(aiText, "ai");
+          }
+        } catch {
+          // fall through to honest fallback
+        }
+      }
+
+      return reply("I don't have a reliable built-in answer for that one, and I'm not going to fake it. I can still help with HOS, trip and fuel math, PM and inspections, trucking terms, scales, detention, logbook edits, RigRevenue features, USDA reefer rates, AAA diesel averages, prayers, and truck GPS setup. Pick one above or ask it straight.", "out_of_scope");
     },
   }),
 
