@@ -1,0 +1,2 @@
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS background_image_blob_key TEXT;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS background_opacity INTEGER NOT NULL DEFAULT 18;
