@@ -158,6 +158,7 @@ export const loads = pgTable("loads", {
   loadGrossCents: integer("load_gross_cents"),
   payPercentBasisPoints: integer("pay_percent_basis_points"),
   perMileRateCents: integer("per_mile_rate_cents"),
+  equipment: text("equipment", { enum: ["reefer", "dryvan", "flatbed", "intermodal", "oversized", "boxtruck", "hotshot"] }),
   notes: text("notes"),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true })
     .notNull()
