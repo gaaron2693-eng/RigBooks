@@ -2875,7 +2875,7 @@ var Actions = {
     request: z.object({
       sessionToken: sessionTokenSchema,
       message: z.string().trim().min(1).max(600),
-      history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(1000) })).max(8).default([]),
+      history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(1000) })).max(10).default([]),
       lat: z.number().min(-90).max(90).optional(),
       lng: z.number().min(-180).max(180).optional()
     }),
@@ -2887,11 +2887,29 @@ var Actions = {
       const courtesyText = lower.replace(/[.!?]+$/g, "").trim();
       const reply = (message, scope, sources = []) => ({ reply: message, scope, sources });
       const money = (value) => `$${value.toFixed(2)}`;
+      const samTruck = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0] ?? null;
+      const samCompany = (await ctx.db().select().from(companyProfile).where(eq(companyProfile.accountId, account.id)).limit(1))[0] ?? null;
+      const firstName = (account.displayName ?? "driver").split(" ")[0] || "driver";
+      const brandLabel = samTruck?.truckBrand ? samTruck.truckBrand.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ") : null;
+      const truckDesc = samTruck ? `${samTruck.truckName}${brandLabel ? ` (${brandLabel})` : ""} \u2014 ${Math.floor(samTruck.heightInches / 12)}'${samTruck.heightInches % 12}" tall, ${samTruck.weightPounds.toLocaleString()} lbs, ${samTruck.lengthFeet} ft long, ${samTruck.widthInches} in wide${samTruck.hazmat ? ", hazmat" : ""}${samTruck.hasPrePass ? ", PrePass" : ""}` : null;
+      const companyName = samCompany?.companyName ?? null;
       if (/^(hello|hi|hey|yo)( sam| there| bro| brodie)?$/.test(courtesyText)) {
-        return reply("Hey, driver. I'm good and ready to work\u2014what are we figuring out?", "courtesy");
+        return reply(`Hey ${firstName}! What's good \u2014 what are we working on?`, "courtesy");
       }
       if (/^(thanks|thank you|thx|appreciate it)( sam| so much| a lot)?$/.test(courtesyText)) {
-        return reply("Anytime, driver. Keep the shiny side up.", "courtesy");
+        return reply(`Anytime, ${firstName}! Go get that money.`, "courtesy");
+      }
+      if (/^(ok|okay|k|got it|gotcha|cool|nice|bet|alright|aight|lol|haha|lmao|yup|yep|yeah|tru+)[.!]*$/.test(courtesyText)) {
+        return reply("You got it. I'm right here whenever you need me.", "courtesy");
+      }
+      if (/^(and|then|so|what about|how about|why\??)[?!.]*$/.test(courtesyText) && args.history.length > 0) {
+        return reply("Say a little more so I point you the right way \u2014 what are we digging into?", "out_of_scope");
+      }
+      if (/(horny|nude|naked|dick|pussy|cock|tits|boobs|blowjob|handjob|vibrator|masturbat|orgasm|cu+mm?(ing)?\b)/.test(lower) || /(rate|show).{0,20}(dick|nude|body|ass\b)/.test(lower)) {
+        return reply("I'm gonna pass on that one, respectfully \u2014 I'm your dispatcher buddy, not that kind of chat. What are we working on: trip, truck, or money?", "out_of_scope");
+      }
+      if (/(i love you|marry me|be my (girl|boy|bae|wife|husband)|you're (hot|sexy|fine)|date me)/.test(lower)) {
+        return reply("Appreciate you, but I'm spoken for \u2014 by the road. I'm here as your trucker buddy, nothing more. What can I help you with?", "out_of_scope");
       }
       const mpgMatch = lower.match(/(?:at|getting|average|averaging|gets?|mpg\s*(?:is|of)?|fuel economy\s*(?:is|of)?)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:mpg)?\b|\b([0-9]+(?:\.[0-9]+)?)\s*mpg\b/);
       const milesMatch = lower.match(/\b([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:route\s*)?(?:miles?|mi)\b/);
@@ -2976,7 +2994,7 @@ These are weekly reefer lane reports, not a live load-board quote. Open Market Z
         return reply("Go to HOS, then Log editing. You can correct off-duty, sleeper, and on-duty entries with a required reason; RigRevenue preserves the original. Drive time is locked and cannot be edited. Review the full day, add notes where needed, then use daily certification. DVIR is in the same HOS area for pre-trip, post-trip, defects, and repair sign-off.", "app_help");
       }
       if (/truck gps|\bgps\b|navigation|navigate|truck route|low bridge|truck profile|dimensions/.test(lower)) {
-        return reply("Go to Road for Truckers \u2192 Set up your truck. Save height, gross weight, total length, and width, then tap Navigate. The truck router uses those limits to avoid known low-clearance, restricted, and unsuitable roads; ordinary car GPS does not. Keep dimensions exact, obey posted signs, and never treat any map as permission past a restriction. Truck navigation is a Pro feature.", "app_help");
+        return reply(`Road for Truckers \u2192 set up your truck first: height, weight, length, width, hazmat toggle, and your truck brand for the map marker. Then build the route \u2014 you get 3D turn-by-turn with an auto day/night map, big turn cards, and true truck routing that avoids known low-clearance and restricted roads. ${truckDesc ? `Your saved setup: ${truckDesc}.` : "You haven't saved a truck yet \u2014 do that in Driver Setup so routing uses your real limits."} Posted signs always win over any map.`, "app_help");
       }
       const terms = [
         { pattern: /deadhead/, answer: "Deadhead is miles driven without a paying load\u2014like running empty to pickup or heading home after delivery. Count it in total miles because it still burns fuel, time, and truck life." },
@@ -3009,7 +3027,7 @@ These are weekly reefer lane reports, not a live load-board quote. Open Market Z
         return reply("Lord, guide this driver with a clear mind, patient hands, and wise decisions. Watch over the road, the truck, everyone nearby, and the family waiting at home. Bring them through this run safely and in peace. Amen.", "prayer");
       }
       if (/maintenance|\bpm\b|preventive|oil change|service due|pre[- ]?trip|post[- ]?trip|tire|brake|coolant/.test(lower)) {
-        const truck = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
+        const truck = samTruck;
         if (/pre[- ]?trip|inspection/.test(lower))
           return reply("Before rolling: inspect tires and wheels, brakes and air lines, lights and reflectors, coupling and fifth wheel, fluids and leaks, steering, mirrors and glass, wipers, horn, emergency gear, load securement, and trailer doors. Do a brake test, verify paperwork, and record defects in HOS \u2192 DVIR. If a safety item is questionable, park it and get it checked.", "maintenance");
         if (truck) {
@@ -3046,7 +3064,7 @@ These are weekly reefer lane reports, not a live load-board quote. Open Market Z
           return reply("Open Loads \u2192 Add load. Enter pickup, dropoff, loaded miles, deadhead miles, rate, and delivery date. RigRevenue uses loaded plus deadhead miles for the real per-mile math. You can also scan a rate con to prefill the load, then review it before saving.", "app_help");
         if (/expense|receipt/.test(lower))
           return reply("Open Expenses \u2192 Add expense. Pick the category, amount, date, and optional gallons or state, then attach the receipt photo. Fuel, tolls, maintenance, insurance, truck payments, and other costs all feed your net.", "app_help");
-        return reply("Main tools: Home for profit and shortcuts; HOS for clocks, DVIR, and log editing; Loads and Expenses for the ledger; The Yard for drivers and broker ratings; Weight for axle math; Road for truck GPS; Market Zone and Diesel Prices for current app feeds; More for business tools and settings.", "app_help");
+        return reply("Main tools: Home for profit and shortcuts; HOS for clocks, DVIR, and log editing; Loads and Expenses for the ledger; The Yard for drivers and broker ratings; Weight for axle math; Road for Truckers for 3D semi-truck GPS with day/night map, hazmat toggle, and truck stops/scales/PrePass alerts; Market Zone and Diesel Prices for current feeds; Settings for your custom app background and truck brand marker; More for business tools.", "app_help");
       }
       if (/trip plan|plan (?:a|my|the) trip|before i roll|route plan|safe trip/.test(lower)) {
         return reply("Build it in this order: 1) confirm pickup, delivery, and appointment time; 2) open Road for Truckers and route with your exact truck dimensions; 3) compare trip miles with legal HOS left; 4) place fuel, scale, rest, and parking stops; 5) check weather and restrictions; 6) do the pre-trip and leave a buffer. Give me your miles, MPG, tank size, and diesel price and I'll run the fuel math too.", "trip_planning");
@@ -3075,7 +3093,7 @@ These are weekly reefer lane reports, not a live load-board quote. Open Market Z
           }
         } catch {}
       }
-      return reply("I don't have a reliable built-in answer for that one, and I'm not going to fake it. I can still help with HOS, trip and fuel math, PM and inspections, trucking terms, scales, detention, logbook edits, RigRevenue features, USDA reefer rates, AAA diesel averages, prayers, and truck GPS setup. Pick one above or ask it straight.", "out_of_scope");
+      return reply("That one's outside what I'm built for, and I won't fake it. I'm your trucker buddy for HOS, trip and fuel math, PM and inspections, trucking terms, scales, detention, logbook edits, RigRevenue features, reefer rates, diesel prices, prayers, and truck GPS setup. Ask me straight and I'll get you sorted.", "out_of_scope");
     }
   }),
   getTruckingNews: defineAction({
