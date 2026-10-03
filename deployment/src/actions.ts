@@ -921,6 +921,39 @@ export const Actions = {
     },
   }),
 
+  saveProfileImage: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      imageDataBase64: z.string().max(8_000_000),
+      imageMimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const bytes = Buffer.from(args.imageDataBase64, "base64");
+      if (bytes.byteLength === 0 || bytes.byteLength > 5_000_000) throw new Error("Profile image must be 5 MB or smaller.");
+      const ext = args.imageMimeType === "image/png" ? "png" : args.imageMimeType === "image/webp" ? "webp" : "jpg";
+      const nextKey = `profiles/${account.id}-${crypto.randomUUID()}.${ext}`;
+      await ctx.blobs.put(nextKey, bytes, { contentType: args.imageMimeType });
+      await ctx.db<typeof schema>().update(schema.accounts).set({ profileImageBlobKey: nextKey, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
+      if (account.profileImageBlobKey) await ctx.blobs.delete(account.profileImageBlobKey).catch(() => undefined);
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
+  removeProfileImage: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args): Promise<{ ok: true }> {
+      const account = await requireAccount(ctx, args.sessionToken);
+      await ctx.db<typeof schema>().update(schema.accounts).set({ profileImageBlobKey: null, updatedAt: new Date() }).where(eq(schema.accounts.id, account.id));
+      if (account.profileImageBlobKey) await ctx.blobs.delete(account.profileImageBlobKey).catch(() => undefined);
+      ctx.invalidateQueries();
+      return { ok: true };
+    },
+  }),
+
   getSubscriptionAccess: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, clientId: clientIdSchema }),
     response: z.object({
@@ -1983,13 +2016,32 @@ export const Actions = {
   }),
 
   createDriverPost: defineAction({
-    request: z.object({ sessionToken: sessionTokenSchema, body: z.string().trim().min(1).max(600) }),
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      body: z.string().trim().max(600).default(""),
+      imageDataBase64: z.string().max(16_000_000).optional(),
+      imageMimeType: z.enum(["image/jpeg", "image/png", "image/webp"]).optional(),
+    }),
     response: z.object({ id: z.number() }),
     async handler(ctx, args) {
+      const body = args.body.trim();
+      if (!body && !args.imageDataBase64) throw new Error("Write something or add a photo before posting.");
+      if (Boolean(args.imageDataBase64) !== Boolean(args.imageMimeType)) throw new Error("That photo could not be read. Choose it again.");
       const account = await requireAccount(ctx, args.sessionToken);
-      const rows = await ctx.db<typeof schema>().insert(schema.driverPosts).values({ accountId: account.id, body: args.body.trim() }).returning({ id: schema.driverPosts.id });
+      let imageBlobKey: string | null = null;
+      if (args.imageDataBase64 && args.imageMimeType) {
+        const bytes = Buffer.from(args.imageDataBase64, "base64");
+        if (bytes.byteLength === 0 || bytes.byteLength > 10_000_000) throw new Error("Use a JPEG, PNG, or WebP photo under 10 MB.");
+        const extension = args.imageMimeType === "image/png" ? "png" : args.imageMimeType === "image/webp" ? "webp" : "jpg";
+        imageBlobKey = `yard/posts/${crypto.randomUUID()}.${extension}`;
+        await ctx.blobs.put(imageBlobKey, bytes, { contentType: args.imageMimeType });
+      }
+      const rows = await ctx.db<typeof schema>().insert(schema.driverPosts).values({ accountId: account.id, body, imageBlobKey }).returning({ id: schema.driverPosts.id });
       const row = rows[0];
-      if (!row) throw new Error("Could not publish that post.");
+      if (!row) {
+        if (imageBlobKey) await ctx.blobs.delete(imageBlobKey);
+        throw new Error("Could not publish that post.");
+      }
       ctx.invalidateQueries();
       return { id: row.id };
     },
@@ -2145,7 +2197,7 @@ export const Actions = {
     response: z.object({ configured: z.boolean(), truckName: z.string(), currentOdometer: z.number(), lastPmOdometer: z.number(), pmInterval: z.number(), nextPmDue: z.number(), milesRemaining: z.number(), status: z.enum(["ok", "soon", "due"]), heightInches: z.number(), weightPounds: z.number(), lengthFeet: z.number(), widthInches: z.number(), hasPrePass: z.boolean() }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
-      await ensurePrePassColumn(ctx);
+      
       const row = (await ctx.db<typeof schema>().select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
       if (!row) return { configured: false, truckName: "My truck", currentOdometer: 0, lastPmOdometer: 0, pmInterval: 15000, nextPmDue: 15000, milesRemaining: 15000, status: "ok" as const, heightInches: 162, weightPounds: 80000, lengthFeet: 75, widthInches: 102, hasPrePass: false };
       const currentOdometer = row.currentOdometerTenths / 10;
@@ -2163,7 +2215,7 @@ export const Actions = {
     async handler(ctx, args): Promise<{ ok: true }> {
       const account = await requireAccount(ctx, args.sessionToken);
       if (args.lastPmOdometer > args.currentOdometer) throw new Error("Last PM reading cannot be higher than the current odometer.");
-      await ensurePrePassColumn(ctx);
+      
       const db = ctx.db<typeof schema>();
       const row = (await db.select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
       const values = { accountId: account.id, truckName: args.truckName.trim(), currentOdometerTenths: Math.round(args.currentOdometer * 10), lastPmOdometerTenths: Math.round(args.lastPmOdometer * 10), pmIntervalTenths: Math.round(args.pmInterval * 10), heightInches: args.heightInches ?? row?.heightInches ?? 162, weightPounds: args.weightPounds ?? row?.weightPounds ?? 80000, lengthFeet: args.lengthFeet ?? row?.lengthFeet ?? 75, widthInches: args.widthInches ?? row?.widthInches ?? 102, hasPrePass: args.hasPrePass ?? row?.hasPrePass ?? false, updatedAt: new Date() };
@@ -2178,7 +2230,7 @@ export const Actions = {
     request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), heightInches: z.number().int().min(96).max(180), weightPounds: z.number().int().min(10000).max(200000), lengthFeet: z.number().int().min(20).max(150), widthInches: z.number().int().min(72).max(144), hasPrePass: z.boolean() }),
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args): Promise<{ ok: true }> {
-      const account = await requireAccount(ctx, args.sessionToken); await ensurePrePassColumn(ctx); const db = ctx.db<typeof schema>();
+      const account = await requireAccount(ctx, args.sessionToken);  const db = ctx.db<typeof schema>();
       const row = (await db.select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
       const values = { accountId: account.id, truckName: args.truckName.trim(), heightInches: args.heightInches, weightPounds: args.weightPounds, lengthFeet: args.lengthFeet, widthInches: args.widthInches, hasPrePass: args.hasPrePass, currentOdometerTenths: row?.currentOdometerTenths ?? 0, lastPmOdometerTenths: row?.lastPmOdometerTenths ?? 0, pmIntervalTenths: row?.pmIntervalTenths ?? 150000, updatedAt: new Date() };
       if (row) await db.update(schema.truckProfiles).set(values).where(eq(schema.truckProfiles.id, row.id)); else await db.insert(schema.truckProfiles).values(values);
@@ -2192,10 +2244,19 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof roadRouteSchema>> {
       const account = await requireAccount(ctx, args.sessionToken);
       if (!(await accountHasProAccess(ctx, account))) throw new Error("Road for Truckers requires RigRevenue Pro.");
-      await ensurePrePassColumn(ctx);
+      
       const truck = (await ctx.db<typeof schema>().select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
       if (!truck) throw new Error("Add your truck profile before planning a route.");
       const geocode = async (query: string) => {
+        // If query is already "lat,lng" coordinates, parse directly (from Use live GPS)
+        const coordMatch = query.trim().match(/^(-?\d+\.?\d*),\s*(-?\d+\.?\d*)$/);
+        if (coordMatch) {
+          const lat = Number(coordMatch[1]);
+          const lng = Number(coordMatch[2]);
+          if (Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+            return { lat, lng, label: query.trim() };
+          }
+        }
         const url = new URL("https://nominatim.openstreetmap.org/search"); url.searchParams.set("q", query); url.searchParams.set("format", "jsonv2"); url.searchParams.set("limit", "1");
         const response = await fetch(url, { headers: { "User-Agent": "RigRevenue/1.0" } });
         if (!response.ok) throw new Error("A route location could not be found.");
@@ -2365,7 +2426,7 @@ export const Actions = {
       }
 
       if (/maintenance|\bpm\b|preventive|oil change|service due|pre[- ]?trip|post[- ]?trip|tire|brake|coolant/.test(lower)) {
-        await ensurePrePassColumn(ctx);
+        
         const truck = (await ctx.db<typeof schema>().select().from(schema.truckProfiles).where(eq(schema.truckProfiles.accountId, account.id)).limit(1))[0];
         if (/pre[- ]?trip|inspection/.test(lower)) return reply("Before rolling: inspect tires and wheels, brakes and air lines, lights and reflectors, coupling and fifth wheel, fluids and leaks, steering, mirrors and glass, wipers, horn, emergency gear, load securement, and trailer doors. Do a brake test, verify paperwork, and record defects in HOS → DVIR. If a safety item is questionable, park it and get it checked.", "maintenance");
         if (truck) {

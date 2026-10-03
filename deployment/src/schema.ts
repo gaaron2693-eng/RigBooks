@@ -15,6 +15,7 @@ export const accounts = pgTable("accounts", {
   passwordSalt: text("password_salt"),
   role: text("role", { enum: ["standard", "creator", "tester"] }).notNull().default("standard"),
   accessLabel: text("access_label"),
+  profileImageBlobKey: text("profile_image_blob_key"),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
@@ -34,6 +35,7 @@ export const driverPosts = pgTable("driver_posts", {
   id: serial("id").primaryKey(),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
   body: text("body").notNull(),
+  imageBlobKey: text("image_blob_key"),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date()),
 }, (table) => [index("driver_posts_created_at_idx").on(table.createdAt)]);
 
