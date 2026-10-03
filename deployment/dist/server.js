@@ -182,6 +182,8 @@ var truckProfiles = pgTable("truck_profiles", {
   lengthFeet: integer("length_feet").notNull().default(75),
   widthInches: integer("width_inches").notNull().default(102),
   hasPrePass: boolean("has_prepass").notNull().default(false),
+  hazmat: boolean("hazmat").notNull().default(false),
+  truckBrand: text("truck_brand"),
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [uniqueIndex("truck_profiles_account_id_unique").on(table.accountId)]);
 var loads = pgTable("loads", {
@@ -630,13 +632,14 @@ var driverPostSchema = z.object({
   likedByViewer: z.boolean(),
   replies: z.array(driverReplySchema)
 });
+var truckBrandSchema = z.enum(["international", "peterbilt", "kenworth", "freightliner", "volvo", "mack", "western_star"]);
 var roadRouteSchema = z.object({
   originLabel: z.string(),
   destinationLabel: z.string(),
   distanceMiles: z.number(),
   durationMinutes: z.number(),
   shape: z.array(z.object({ lat: z.number(), lng: z.number() })),
-  maneuvers: z.array(z.object({ instruction: z.string(), distanceMiles: z.number(), timeMinutes: z.number() })),
+  maneuvers: z.array(z.object({ instruction: z.string(), maneuverType: z.number().int(), distanceMiles: z.number(), timeMinutes: z.number() })),
   truckStops: z.array(truckPlaceSchema),
   attribution: z.string()
 });
@@ -2693,22 +2696,22 @@ var Actions = {
   }),
   getTruckProfile: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema }),
-    response: z.object({ configured: z.boolean(), truckName: z.string(), currentOdometer: z.number(), lastPmOdometer: z.number(), pmInterval: z.number(), nextPmDue: z.number(), milesRemaining: z.number(), status: z.enum(["ok", "soon", "due"]), heightInches: z.number(), weightPounds: z.number(), lengthFeet: z.number(), widthInches: z.number(), hasPrePass: z.boolean() }),
+    response: z.object({ configured: z.boolean(), truckName: z.string(), currentOdometer: z.number(), lastPmOdometer: z.number(), pmInterval: z.number(), nextPmDue: z.number(), milesRemaining: z.number(), status: z.enum(["ok", "soon", "due"]), heightInches: z.number(), weightPounds: z.number(), lengthFeet: z.number(), widthInches: z.number(), hasPrePass: z.boolean(), hazmat: z.boolean(), truckBrand: truckBrandSchema.nullable() }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
       const row = (await ctx.db().select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
       if (!row)
-        return { configured: false, truckName: "My truck", currentOdometer: 0, lastPmOdometer: 0, pmInterval: 15000, nextPmDue: 15000, milesRemaining: 15000, status: "ok", heightInches: 162, weightPounds: 80000, lengthFeet: 75, widthInches: 102, hasPrePass: false };
+        return { configured: false, truckName: "My truck", currentOdometer: 0, lastPmOdometer: 0, pmInterval: 15000, nextPmDue: 15000, milesRemaining: 15000, status: "ok", heightInches: 162, weightPounds: 80000, lengthFeet: 75, widthInches: 102, hasPrePass: false, hazmat: false, truckBrand: null };
       const currentOdometer = row.currentOdometerTenths / 10;
       const lastPmOdometer = row.lastPmOdometerTenths / 10;
       const pmInterval = row.pmIntervalTenths / 10;
       const nextPmDue = lastPmOdometer + pmInterval;
       const milesRemaining = nextPmDue - currentOdometer;
-      return { configured: true, truckName: row.truckName, currentOdometer, lastPmOdometer, pmInterval, nextPmDue, milesRemaining, status: milesRemaining <= 0 ? "due" : milesRemaining <= Math.min(1000, pmInterval * 0.1) ? "soon" : "ok", heightInches: row.heightInches, weightPounds: row.weightPounds, lengthFeet: row.lengthFeet, widthInches: row.widthInches, hasPrePass: row.hasPrePass };
+      return { configured: true, truckName: row.truckName, currentOdometer, lastPmOdometer, pmInterval, nextPmDue, milesRemaining, status: milesRemaining <= 0 ? "due" : milesRemaining <= Math.min(1000, pmInterval * 0.1) ? "soon" : "ok", heightInches: row.heightInches, weightPounds: row.weightPounds, lengthFeet: row.lengthFeet, widthInches: row.widthInches, hasPrePass: row.hasPrePass, hazmat: row.hazmat, truckBrand: row.truckBrand };
     }
   }),
   saveTruckProfile: defineAction({
-    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), currentOdometer: z.number().finite().min(0).max(1e7), lastPmOdometer: z.number().finite().min(0).max(1e7), pmInterval: z.number().finite().positive().max(1e6), heightInches: z.number().int().min(96).max(180).optional(), weightPounds: z.number().int().min(1e4).max(200000).optional(), lengthFeet: z.number().int().min(20).max(150).optional(), widthInches: z.number().int().min(72).max(144).optional(), hasPrePass: z.boolean().optional() }),
+    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), currentOdometer: z.number().finite().min(0).max(1e7), lastPmOdometer: z.number().finite().min(0).max(1e7), pmInterval: z.number().finite().positive().max(1e6), heightInches: z.number().int().min(96).max(180).optional(), weightPounds: z.number().int().min(1e4).max(200000).optional(), lengthFeet: z.number().int().min(20).max(150).optional(), widthInches: z.number().int().min(72).max(144).optional(), hasPrePass: z.boolean().optional(), hazmat: z.boolean().optional(), truckBrand: truckBrandSchema.nullable().optional() }),
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
@@ -2716,7 +2719,7 @@ var Actions = {
         throw new Error("Last PM reading cannot be higher than the current odometer.");
       const db = ctx.db();
       const row = (await db.select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
-      const values = { accountId: account.id, truckName: args.truckName.trim(), currentOdometerTenths: Math.round(args.currentOdometer * 10), lastPmOdometerTenths: Math.round(args.lastPmOdometer * 10), pmIntervalTenths: Math.round(args.pmInterval * 10), heightInches: args.heightInches ?? row?.heightInches ?? 162, weightPounds: args.weightPounds ?? row?.weightPounds ?? 80000, lengthFeet: args.lengthFeet ?? row?.lengthFeet ?? 75, widthInches: args.widthInches ?? row?.widthInches ?? 102, hasPrePass: args.hasPrePass ?? row?.hasPrePass ?? false, updatedAt: new Date };
+      const values = { accountId: account.id, truckName: args.truckName.trim(), currentOdometerTenths: Math.round(args.currentOdometer * 10), lastPmOdometerTenths: Math.round(args.lastPmOdometer * 10), pmIntervalTenths: Math.round(args.pmInterval * 10), heightInches: args.heightInches ?? row?.heightInches ?? 162, weightPounds: args.weightPounds ?? row?.weightPounds ?? 80000, lengthFeet: args.lengthFeet ?? row?.lengthFeet ?? 75, widthInches: args.widthInches ?? row?.widthInches ?? 102, hasPrePass: args.hasPrePass ?? row?.hasPrePass ?? false, hazmat: args.hazmat ?? row?.hazmat ?? false, truckBrand: args.truckBrand === undefined ? row?.truckBrand ?? null : args.truckBrand, updatedAt: new Date };
       if (row)
         await db.update(truckProfiles).set(values).where(eq(truckProfiles.id, row.id));
       else
@@ -2726,13 +2729,13 @@ var Actions = {
     }
   }),
   saveTruckRouteProfile: defineAction({
-    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), heightInches: z.number().int().min(96).max(180), weightPounds: z.number().int().min(1e4).max(200000), lengthFeet: z.number().int().min(20).max(150), widthInches: z.number().int().min(72).max(144), hasPrePass: z.boolean() }),
+    request: z.object({ sessionToken: sessionTokenSchema, truckName: z.string().trim().min(1).max(80), heightInches: z.number().int().min(96).max(180), weightPounds: z.number().int().min(1e4).max(200000), lengthFeet: z.number().int().min(20).max(150), widthInches: z.number().int().min(72).max(144), hasPrePass: z.boolean(), hazmat: z.boolean(), truckBrand: truckBrandSchema.nullable() }),
     response: z.object({ ok: z.literal(true) }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
       const db = ctx.db();
       const row = (await db.select().from(truckProfiles).where(eq(truckProfiles.accountId, account.id)).limit(1))[0];
-      const values = { accountId: account.id, truckName: args.truckName.trim(), heightInches: args.heightInches, weightPounds: args.weightPounds, lengthFeet: args.lengthFeet, widthInches: args.widthInches, hasPrePass: args.hasPrePass, currentOdometerTenths: row?.currentOdometerTenths ?? 0, lastPmOdometerTenths: row?.lastPmOdometerTenths ?? 0, pmIntervalTenths: row?.pmIntervalTenths ?? 150000, updatedAt: new Date };
+      const values = { accountId: account.id, truckName: args.truckName.trim(), heightInches: args.heightInches, weightPounds: args.weightPounds, lengthFeet: args.lengthFeet, widthInches: args.widthInches, hasPrePass: args.hasPrePass, hazmat: args.hazmat, truckBrand: args.truckBrand, currentOdometerTenths: row?.currentOdometerTenths ?? 0, lastPmOdometerTenths: row?.lastPmOdometerTenths ?? 0, pmIntervalTenths: row?.pmIntervalTenths ?? 150000, updatedAt: new Date };
       if (row)
         await db.update(truckProfiles).set(values).where(eq(truckProfiles.id, row.id));
       else
@@ -2776,7 +2779,7 @@ var Actions = {
         return { lat, lng, label: row?.display_name ?? query };
       };
       const [origin, destination] = await Promise.all([geocode(args.origin), geocode(args.destination)]);
-      const routeResponse = await fetch("https://valhalla1.openstreetmap.de/route", { method: "POST", headers: { "Content-Type": "application/json", "X-Client-Id": "rigrevenue", "User-Agent": "RigRevenue/1.0" }, body: JSON.stringify({ locations: [{ lat: origin.lat, lon: origin.lng }, { lat: destination.lat, lon: destination.lng }], costing: "truck", costing_options: { truck: { height: truck.heightInches * 0.0254, width: truck.widthInches * 0.0254, length: truck.lengthFeet * 0.3048, weight: truck.weightPounds * 0.000453592, axle_load: Math.min(20, truck.weightPounds * 0.000453592 / 5), hazmat: false } }, units: "miles", language: "en-US" }) });
+      const routeResponse = await fetch("https://valhalla1.openstreetmap.de/route", { method: "POST", headers: { "Content-Type": "application/json", "X-Client-Id": "rigrevenue", "User-Agent": "RigRevenue/1.0" }, body: JSON.stringify({ locations: [{ lat: origin.lat, lon: origin.lng }, { lat: destination.lat, lon: destination.lng }], costing: "truck", costing_options: { truck: { height: truck.heightInches * 0.0254, width: truck.widthInches * 0.0254, length: truck.lengthFeet * 0.3048, weight: truck.weightPounds * 0.000453592, axle_load: Math.min(20, truck.weightPounds * 0.000453592 / 5), hazmat: truck.hazmat ?? false } }, units: "miles", language: "en-US" }) });
       if (!routeResponse.ok)
         throw new Error("A truck-safe route could not be calculated right now.");
       const routeData = await routeResponse.json();
@@ -2812,7 +2815,7 @@ var Actions = {
         const address = [tags["addr:housenumber"], tags["addr:street"], tags["addr:city"], tags["addr:state"]].filter(Boolean).join(" ") || null;
         return [{ id: `${element.type ?? "node"}-${element.id ?? `${lat}-${lng}`}`, name: tags.name || tags.brand || (isCat ? "CAT Scale" : "Truck stop"), category, address, lat, lng, distanceMiles: Math.round(nearest * 10) / 10 }];
       }).sort((a, b) => a.distanceMiles - b.distanceMiles).slice(0, 12);
-      return { originLabel: origin.label, destinationLabel: destination.label, distanceMiles: Math.round(summary.length * 10) / 10, durationMinutes: Math.round(summary.time / 60), shape, maneuvers: (leg.maneuvers ?? []).map((item) => ({ instruction: item.instruction ?? "Continue", distanceMiles: Math.round((item.length ?? 0) * 10) / 10, timeMinutes: Math.max(1, Math.round((item.time ?? 0) / 60)) })), truckStops, attribution: "Route and place data \xA9 OpenStreetMap contributors" };
+      return { originLabel: origin.label, destinationLabel: destination.label, distanceMiles: Math.round(summary.length * 10) / 10, durationMinutes: Math.round(summary.time / 60), shape, maneuvers: (leg.maneuvers ?? []).map((item) => ({ instruction: item.instruction ?? "Continue", maneuverType: Number.isFinite(item.type) ? Math.trunc(item.type ?? 0) : 0, distanceMiles: Math.round((item.length ?? 0) * 10) / 10, timeMinutes: Math.max(1, Math.round((item.time ?? 0) / 60)) })), truckStops, attribution: "Route and place data \xA9 OpenStreetMap contributors" };
     }
   }),
   askSam: defineAction({
@@ -3424,7 +3427,7 @@ var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql", "010_yard_post_photos.sql", "011_profile_image.sql", "012_yard_moderation_logs.sql"];
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql", "010_yard_post_photos.sql", "011_profile_image.sql", "012_yard_moderation_logs.sql", "013_hazmat_truck_brand.sql"];
 var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
@@ -3580,7 +3583,7 @@ async function serveStatic(pathname) {
   if (!await file.exists())
     file = Bun.file(join(clientRoot, "index.html"));
   const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
-  return new Response(file, { headers: { "Content-Type": mime[extname(file.name || safePath)] || "application/octet-stream", "Cache-Control": requested === "index.html" ? "no-cache" : "public, max-age=31536000, immutable", "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob: https://tile.openstreetmap.org https://basemaps.cartocdn.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; script-src 'self' https://unpkg.com; connect-src 'self' https://api.openai.com https://nominatim.openstreetmap.org https://router.project-osrm.org https://valhalla1.openstreetmap.de https://overpass-api.de https://overpass.kumi.systems https://overpass.private.coffee; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self'" } });
+  return new Response(file, { headers: { "Content-Type": mime[extname(file.name || safePath)] || "application/octet-stream", "Cache-Control": requested === "index.html" ? "no-cache" : "public, max-age=31536000, immutable", "Content-Security-Policy": "default-src 'self'; img-src 'self' data: blob: https://tile.openstreetmap.org https://basemaps.cartocdn.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com; script-src 'self' https://unpkg.com; worker-src 'self' blob:; connect-src 'self' https://api.openai.com https://nominatim.openstreetmap.org https://router.project-osrm.org https://valhalla1.openstreetmap.de https://overpass-api.de https://overpass.kumi.systems https://overpass.private.coffee https://basemaps.cartocdn.com; font-src 'self' data: https://fonts.gstatic.com; frame-ancestors 'self'" } });
 }
 async function verifyStripeSignature(payload, header, secret) {
   const fields = new Map;
