@@ -37,6 +37,7 @@ var exports_schema = {};
 __export(exports_schema, {
   accountSessions: () => accountSessions,
   accounts: () => accounts,
+  appFeedback: () => appFeedback,
   communityRatings: () => communityRatings,
   compInvites: () => compInvites,
   companyProfile: () => companyProfile,
@@ -56,6 +57,7 @@ __export(exports_schema, {
   iftaEntries: () => iftaEntries,
   invoices: () => invoices,
   loads: () => loads,
+  marketZoneSnapshots: () => marketZoneSnapshots,
   paySettings: () => paySettings,
   stripeSubscriptions: () => stripeSubscriptions,
   subscriptionAccess: () => subscriptionAccess,
@@ -205,6 +207,7 @@ var loads = pgTable("loads", {
   loadGrossCents: integer("load_gross_cents"),
   payPercentBasisPoints: integer("pay_percent_basis_points"),
   perMileRateCents: integer("per_mile_rate_cents"),
+  equipment: text("equipment", { enum: ["reefer", "dryvan", "flatbed", "intermodal", "oversized", "boxtruck", "hotshot"] }),
   notes: text("notes"),
   createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 });
@@ -401,6 +404,23 @@ var walletDocuments = pgTable("wallet_documents", {
   updatedAt: timestamp("updated_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
 }, (table) => [
   index("wallet_documents_account_expiry_idx").on(table.accountId, table.expiryDate)
+]);
+var marketZoneSnapshots = pgTable("market_zone_snapshots", {
+  id: serial("id").primaryKey(),
+  payloadJson: text("payload_json").notNull(),
+  weekEnding: text("week_ending"),
+  fetchedAt: timestamp("fetched_at", { mode: "date", withTimezone: true }).notNull()
+}, (table) => [
+  index("market_zone_snapshots_fetched_at_idx").on(table.fetchedAt)
+]);
+var appFeedback = pgTable("app_feedback", {
+  id: serial("id").primaryKey(),
+  accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
+  rating: integer("rating").notNull(),
+  comment: text("comment"),
+  createdAt: timestamp("created_at", { mode: "date", withTimezone: true }).notNull().$defaultFn(() => new Date)
+}, (table) => [
+  index("app_feedback_created_at_idx").on(table.createdAt)
 ]);
 
 // src/actions.ts
@@ -685,7 +705,8 @@ var driverReplySchema = z.object({
   postId: z.number(),
   driverName: z.string(),
   body: z.string(),
-  createdAt: z.string()
+  createdAt: z.string(),
+  canDelete: z.boolean()
 });
 var driverPostSchema = z.object({
   id: z.number(),
@@ -694,6 +715,7 @@ var driverPostSchema = z.object({
   createdAt: z.string(),
   likeCount: z.number(),
   likedByViewer: z.boolean(),
+  canDelete: z.boolean(),
   replies: z.array(driverReplySchema)
 });
 var truckBrandSchema = z.enum(["international", "peterbilt", "kenworth", "freightliner", "volvo", "mack", "western_star"]);
@@ -1213,6 +1235,94 @@ async function fetchAaaDieselPrices() {
     return [];
   }
 }
+function compileMarketZonesPayload(rows) {
+  const weekEnding = rows[0]?.date ? rows[0].date.slice(0, 10) : null;
+  const byRegion = new Map;
+  const byDest = new Map;
+  for (const row of rows) {
+    if (row.region) {
+      const list = byRegion.get(row.region) ?? [];
+      list.push(row);
+      byRegion.set(row.region, list);
+    }
+    if (row.destination) {
+      const list = byDest.get(row.destination) ?? [];
+      list.push(row);
+      byDest.set(row.destination, list);
+    }
+  }
+  const avg = (values) => {
+    const valid = values.filter((v) => v != null);
+    return valid.length ? Math.round(valid.reduce((a, b) => a + b, 0) / valid.length * 100) / 100 : null;
+  };
+  const outbound = [...byRegion.entries()].map(([region, list]) => {
+    const rpms = list.map((r) => {
+      const direct = marketNum(r.rpm);
+      if (direct != null)
+        return direct;
+      const mid = marketNum(r.midpoint);
+      const dist = marketNum(r.distance);
+      return mid != null && dist ? mid / dist : null;
+    });
+    const avgRpm = avg(rpms);
+    const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
+    const availability = avg(list.map((r) => marketNum(r.availability)));
+    const richest = [...list].sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0))[0];
+    const richestMid = richest ? marketNum(richest.midpoint) : null;
+    return {
+      region,
+      label: MARKET_REGION_LABELS[region] ?? titleCaseMarket(region),
+      heat: outboundHeat(availability, avgRpm),
+      avgRpm,
+      avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
+      availability,
+      lanes: list.length,
+      sampleLane: richest && richestMid != null ? { destination: titleCaseMarket(richest.destination ?? ""), midpoint: Math.round(richestMid) } : null
+    };
+  }).sort((a, b) => {
+    const order = { hot: 0, warm: 1, cold: 2 };
+    return order[a.heat] - order[b.heat] || (b.avgRpm ?? 0) - (a.avgRpm ?? 0);
+  });
+  const inbound = [...byDest.entries()].map(([city, list]) => {
+    const rpms = list.map((r) => {
+      const direct = marketNum(r.rpm);
+      if (direct != null)
+        return direct;
+      const mid = marketNum(r.midpoint);
+      const dist = marketNum(r.distance);
+      return mid != null && dist ? mid / dist : null;
+    });
+    const avgRpm = avg(rpms);
+    const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
+    return {
+      city: titleCaseMarket(city),
+      heat: inboundHeat(avgRpm, avgLoad),
+      avgRpm,
+      avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
+      lanes: list.length
+    };
+  }).sort((a, b) => {
+    const order = { hot: 0, warm: 1, cold: 2 };
+    return order[a.heat] - order[b.heat] || (b.avgLoad ?? 0) - (a.avgLoad ?? 0);
+  });
+  const topLanes = [...rows].sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0)).slice(0, 12).map((r) => ({
+    origin: shortOrigin(r.origin ?? ""),
+    destination: titleCaseMarket(r.destination ?? ""),
+    midpoint: marketNum(r.midpoint) != null ? Math.round(marketNum(r.midpoint)) : null,
+    rpm: (() => {
+      const direct = marketNum(r.rpm);
+      if (direct != null)
+        return Math.round(direct * 100) / 100;
+      const mid = marketNum(r.midpoint);
+      const dist = marketNum(r.distance);
+      return mid != null && dist ? Math.round(mid / dist * 100) / 100 : null;
+    })(),
+    miles: marketNum(r.distance) != null ? Math.round(marketNum(r.distance)) : null,
+    availability: marketNum(r.availability)
+  }));
+  return { ok: true, weekEnding, source: "USDA AgTransport", outbound, inbound, topLanes, error: null };
+}
+var MARKET_ZONES_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 var Actions = {
   getAccountStatus: defineAction({
     request: z.object({ legacyClientId: clientIdSchema, sessionToken: sessionTokenSchema.optional() }),
@@ -2074,6 +2184,7 @@ var Actions = {
       deliveredOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
       loadedMiles: z.number().finite().positive().max(1e5),
       deadheadMiles: z.number().finite().min(0).max(1e5).default(0),
+      equipment: z.enum(["reefer", "dryvan", "flatbed", "intermodal", "oversized", "boxtruck", "hotshot"]).optional(),
       payMode: payModeSchema.default("flat"),
       grossPay: z.number().finite().positive().max(1e7).optional(),
       loadGross: z.number().finite().positive().max(1e7).optional(),
@@ -2105,6 +2216,7 @@ var Actions = {
         loadGrossCents: args.payMode === "percentage" ? loadGrossCents : null,
         payPercentBasisPoints: args.payMode === "percentage" ? payPercentBasisPoints : null,
         perMileRateCents: args.payMode === "per_mile" ? perMileRateCents : null,
+        equipment: args.equipment ?? null,
         notes: cleanOptional(args.notes)
       }).returning({ id: loads.id });
       const inserted = result[0];
@@ -2737,7 +2849,7 @@ var Actions = {
   }),
   listDriverFeed: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, limit: z.number().int().min(1).max(100).default(40) }),
-    response: z.object({ posts: z.array(driverPostSchema), memberCount: z.number(), asOf: z.string() }),
+    response: z.object({ posts: z.array(driverPostSchema), memberCount: z.number(), moderatorMode: z.boolean(), asOf: z.string() }),
     async handler(ctx, args) {
       const account = await requireAccount(ctx, args.sessionToken);
       const db = ctx.db();
@@ -2746,8 +2858,9 @@ var Actions = {
         db.select({ id: accounts.id }).from(accounts)
       ]);
       const memberCount = memberRows.length;
+      const moderatorMode = account.role === "creator";
       if (postRows.length === 0)
-        return { posts: [], memberCount, asOf: new Date().toISOString() };
+        return { posts: [], memberCount, moderatorMode, asOf: new Date().toISOString() };
       const postIds = postRows.map((row) => row.id);
       const [replyRows, likeRows] = await Promise.all([
         db.select().from(driverReplies).where(inArray(driverReplies.postId, postIds)).orderBy(asc(driverReplies.createdAt)),
@@ -2765,16 +2878,18 @@ var Actions = {
           createdAt: post.createdAt.toISOString(),
           likeCount: likes.length,
           likedByViewer: likes.some((like) => like.accountId === account.id),
+          canDelete: moderatorMode || post.accountId === account.id,
           replies: replyRows.filter((reply) => reply.postId === post.id).map((reply) => ({
             id: reply.id,
             postId: reply.postId,
             driverName: names.get(reply.accountId) ?? "RigRevenue driver",
             body: reply.body,
-            createdAt: reply.createdAt.toISOString()
+            createdAt: reply.createdAt.toISOString(),
+            canDelete: moderatorMode || reply.accountId === account.id
           }))
         };
       });
-      return { posts, memberCount, asOf: new Date().toISOString() };
+      return { posts, memberCount, moderatorMode, asOf: new Date().toISOString() };
     }
   }),
   createDriverPost: defineAction({
@@ -2805,12 +2920,17 @@ var Actions = {
         `Post text: ${JSON.stringify(body || "[photo-only post]")}`
       ].join(`
 `);
-      const moderation = args.imageDataBase64 && args.imageMimeType ? await ctx.inference.complete(moderationPrompt, {
-        schema: yardModerationDecisionSchema,
-        images: [{ dataBase64: args.imageDataBase64, mimeType: args.imageMimeType }]
-      }) : await ctx.inference.complete(moderationPrompt, { schema: yardModerationDecisionSchema });
-      const category = moderation.category === "none" ? null : moderation.category;
-      if (moderation.decision === "remove" && category) {
+      let moderation = null;
+      try {
+        moderation = args.imageDataBase64 && args.imageMimeType ? await ctx.inference.complete(moderationPrompt, {
+          schema: yardModerationDecisionSchema,
+          images: [{ dataBase64: args.imageDataBase64, mimeType: args.imageMimeType }]
+        }) : await ctx.inference.complete(moderationPrompt, { schema: yardModerationDecisionSchema });
+      } catch (err) {
+        console.warn("[yard] AI moderation unavailable, allowing post:", err instanceof Error ? err.message : err);
+      }
+      const category = moderation && moderation.category !== "none" ? moderation.category : null;
+      if (moderation && moderation.decision === "remove" && category) {
         await ctx.db().insert(yardModerationLogs).values({
           accountId: account.id,
           driverName: account.displayName,
@@ -2860,6 +2980,69 @@ var Actions = {
           reason: row.reason,
           createdAt: row.createdAt.toISOString()
         })),
+        asOf: new Date().toISOString()
+      };
+    }
+  }),
+  submitAppFeedback: defineAction({
+    request: z.object({
+      sessionToken: sessionTokenSchema,
+      rating: z.number().int().min(1).max(5),
+      comment: z.string().trim().max(1000).optional()
+    }),
+    response: z.object({ id: z.number() }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      const comment = args.comment?.trim() ? args.comment.trim() : null;
+      const rows = await ctx.db().insert(appFeedback).values({
+        accountId: account.id,
+        rating: args.rating,
+        comment
+      }).returning({ id: appFeedback.id });
+      const row = rows[0];
+      if (!row)
+        throw new Error("Could not save your feedback. Try again in a bit.");
+      return { id: row.id };
+    }
+  }),
+  listAppFeedback: defineAction({
+    request: z.object({ sessionToken: sessionTokenSchema, limit: z.number().int().min(1).max(100).default(50) }),
+    response: z.object({
+      feedback: z.array(z.object({
+        id: z.number(),
+        rating: z.number().int().min(1).max(5),
+        comment: z.string().nullable(),
+        driverName: z.string().nullable(),
+        createdAt: z.string()
+      })),
+      averageRating: z.number().nullable(),
+      totalCount: z.number(),
+      asOf: z.string()
+    }),
+    async handler(ctx, args) {
+      const account = await requireAccount(ctx, args.sessionToken);
+      if (account.role !== "creator")
+        throw new Error("Only the creator can review app feedback.");
+      const db = ctx.db();
+      const rows = await db.select({
+        id: appFeedback.id,
+        rating: appFeedback.rating,
+        comment: appFeedback.comment,
+        driverName: accounts.displayName,
+        createdAt: appFeedback.createdAt
+      }).from(appFeedback).leftJoin(accounts, eq(appFeedback.accountId, accounts.id)).orderBy(desc(appFeedback.createdAt)).limit(args.limit);
+      const all = await db.select({ rating: appFeedback.rating }).from(appFeedback);
+      const averageRating = all.length ? Math.round(all.reduce((sum, r) => sum + r.rating, 0) / all.length * 10) / 10 : null;
+      return {
+        feedback: rows.map((row) => ({
+          id: row.id,
+          rating: row.rating,
+          comment: row.comment,
+          driverName: row.driverName,
+          createdAt: row.createdAt.toISOString()
+        })),
+        averageRating,
+        totalCount: all.length,
         asOf: new Date().toISOString()
       };
     }
@@ -3489,10 +3672,14 @@ ${JSON.stringify(result)}`, { schema: z.array(truckingNewsItemSchema).max(10) })
     }),
     response: scannedLoadSchema,
     async handler(ctx, args) {
-      return ctx.inference.complete("Read this trucking rate confirmation or load sheet. Extract the pickup location, delivery location, loaded miles, total carrier/load pay, load/reference number, and broker or customer. Preserve useful city/state or full address text. Use null for anything not visible or uncertain. Money and miles must be numbers without symbols.", {
-        schema: scannedLoadSchema,
-        images: [{ dataBase64: args.imageDataBase64, mimeType: args.mimeType, filename: args.filename }]
-      });
+      try {
+        return await ctx.inference.complete("Read this trucking rate confirmation or load sheet. Extract the pickup location, delivery location, loaded miles, total carrier/load pay, load/reference number, and broker or customer. Preserve useful city/state or full address text. Use null for anything not visible or uncertain. Money and miles must be numbers without symbols.", {
+          schema: scannedLoadSchema,
+          images: [{ dataBase64: args.imageDataBase64, mimeType: args.mimeType, filename: args.filename }]
+        });
+      } catch {
+        throw new Error("Auto-read is taking a break right now. Enter the load details by hand \u2014 it only takes a minute.");
+      }
     }
   }),
   calculateDeadhead: defineAction({
@@ -3595,6 +3782,87 @@ ${JSON.stringify(result)}`, { schema: z.array(truckingNewsItemSchema).max(10) })
       return { places, asOf: new Date().toISOString() };
     }
   }),
+  getCommunityRates: defineAction({
+    request: z.object({ equipment: z.enum(["reefer", "dryvan", "flatbed", "intermodal", "oversized", "boxtruck", "hotshot"]) }),
+    response: z.object({
+      equipment: z.string(),
+      totalLoads: z.number(),
+      lanes: z.array(z.object({
+        originState: z.string(),
+        destinationState: z.string(),
+        avgPerMile: z.number(),
+        avgLoad: z.number(),
+        loadCount: z.number(),
+        latestDeliveredOn: z.string().nullable()
+      })),
+      stateRates: z.array(z.object({
+        state: z.string(),
+        avgPerMile: z.number(),
+        avgLoad: z.number(),
+        loadCount: z.number(),
+        latestDeliveredOn: z.string().nullable()
+      }))
+    }),
+    async handler(ctx, args) {
+      const MIN_LOADS_PER_LANE = 3;
+      const rows = await ctx.db().select({
+        origin: loads.origin,
+        destination: loads.destination,
+        deliveredOn: loads.deliveredOn,
+        loadedMilesTenths: loads.loadedMilesTenths,
+        grossPayCents: loads.grossPayCents
+      }).from(loads).where(eq(loads.equipment, args.equipment));
+      const laneMap = new Map;
+      const stateMap = new Map;
+      const bump = (map, key, payCents, milesTenths, deliveredOn) => {
+        const agg = map.get(key) ?? { payCents: 0, milesTenths: 0, count: 0, latest: null };
+        agg.payCents += payCents;
+        agg.milesTenths += milesTenths;
+        agg.count += 1;
+        if (!agg.latest || deliveredOn > agg.latest)
+          agg.latest = deliveredOn;
+        map.set(key, agg);
+      };
+      let totalLoads = 0;
+      for (const row of rows) {
+        if (row.grossPayCents <= 0 || row.loadedMilesTenths <= 0)
+          continue;
+        const originState = stateFromLocation(row.origin);
+        const destState = stateFromLocation(row.destination);
+        if (!originState || !destState)
+          continue;
+        totalLoads += 1;
+        bump(laneMap, `${originState}|${destState}`, row.grossPayCents, row.loadedMilesTenths, row.deliveredOn);
+        bump(stateMap, originState, row.grossPayCents, row.loadedMilesTenths, row.deliveredOn);
+      }
+      const toLane = (key, agg) => {
+        const parts = key.split("|");
+        const originState = parts[0] ?? "";
+        const destinationState = parts[1] ?? "";
+        const miles = agg.milesTenths / 10;
+        return {
+          originState,
+          destinationState,
+          avgPerMile: miles > 0 ? Math.round(agg.payCents / 100 / miles * 100) / 100 : 0,
+          avgLoad: agg.count > 0 ? Math.round(agg.payCents / 100 / agg.count) : 0,
+          loadCount: agg.count,
+          latestDeliveredOn: agg.latest
+        };
+      };
+      const lanes = [...laneMap.entries()].filter(([, agg]) => agg.count >= MIN_LOADS_PER_LANE).map(([key, agg]) => toLane(key, agg)).sort((a, b) => b.loadCount - a.loadCount || b.avgPerMile - a.avgPerMile);
+      const stateRates = [...stateMap.entries()].filter(([, agg]) => agg.count >= MIN_LOADS_PER_LANE).map(([state, agg]) => {
+        const miles = agg.milesTenths / 10;
+        return {
+          state,
+          avgPerMile: miles > 0 ? Math.round(agg.payCents / 100 / miles * 100) / 100 : 0,
+          avgLoad: agg.count > 0 ? Math.round(agg.payCents / 100 / agg.count) : 0,
+          loadCount: agg.count,
+          latestDeliveredOn: agg.latest
+        };
+      }).sort((a, b) => b.avgPerMile - a.avgPerMile);
+      return { equipment: args.equipment, totalLoads, lanes, stateRates };
+    }
+  }),
   getMarketZones: defineAction({
     request: z.object({}),
     response: z.object({
@@ -3626,98 +3894,47 @@ ${JSON.stringify(result)}`, { schema: z.array(truckingNewsItemSchema).max(10) })
         miles: z.number().nullable(),
         availability: z.number().nullable()
       })),
-      error: z.string().nullable()
+      error: z.string().nullable(),
+      fetchedAt: z.string().nullable(),
+      stale: z.boolean()
     }),
-    async handler() {
-      const rows = await fetchUsdaReeferRows();
-      if (rows.length === 0) {
-        return { ok: false, weekEnding: null, source: "USDA AgTransport", outbound: [], inbound: [], topLanes: [], error: "Live market data is temporarily unavailable. Try again in a few minutes." };
-      }
-      const weekEnding = rows[0]?.date ? rows[0].date.slice(0, 10) : null;
-      const byRegion = new Map;
-      const byDest = new Map;
-      for (const row of rows) {
-        if (row.region) {
-          const list = byRegion.get(row.region) ?? [];
-          list.push(row);
-          byRegion.set(row.region, list);
-        }
-        if (row.destination) {
-          const list = byDest.get(row.destination) ?? [];
-          list.push(row);
-          byDest.set(row.destination, list);
-        }
-      }
-      const avg = (values) => {
-        const valid = values.filter((v) => v != null);
-        return valid.length ? Math.round(valid.reduce((a, b) => a + b, 0) / valid.length * 100) / 100 : null;
+    async handler(ctx) {
+      const db = ctx.db();
+      const snapshot = (await db.select().from(marketZoneSnapshots).orderBy(desc(marketZoneSnapshots.fetchedAt)).limit(1))[0];
+      const snapshotAgeMs = snapshot ? Date.now() - new Date(snapshot.fetchedAt).getTime() : Number.POSITIVE_INFINITY;
+      const readSnapshot = () => {
+        if (!snapshot)
+          return null;
+        try {
+          const decoded = JSON.parse(snapshot.payloadJson);
+          if (decoded && typeof decoded === "object" && "outbound" in decoded) {
+            return {
+              ...decoded,
+              fetchedAt: new Date(snapshot.fetchedAt).toISOString(),
+              stale: snapshotAgeMs > MARKET_ZONES_TTL_MS
+            };
+          }
+        } catch {}
+        return null;
       };
-      const outbound = [...byRegion.entries()].map(([region, list]) => {
-        const rpms = list.map((r) => {
-          const direct = marketNum(r.rpm);
-          if (direct != null)
-            return direct;
-          const mid = marketNum(r.midpoint);
-          const dist = marketNum(r.distance);
-          return mid != null && dist ? mid / dist : null;
-        });
-        const avgRpm = avg(rpms);
-        const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
-        const availability = avg(list.map((r) => marketNum(r.availability)));
-        const richest = [...list].sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0))[0];
-        const richestMid = richest ? marketNum(richest.midpoint) : null;
-        return {
-          region,
-          label: MARKET_REGION_LABELS[region] ?? titleCaseMarket(region),
-          heat: outboundHeat(availability, avgRpm),
-          avgRpm,
-          avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
-          availability,
-          lanes: list.length,
-          sampleLane: richest && richestMid != null ? { destination: titleCaseMarket(richest.destination ?? ""), midpoint: Math.round(richestMid) } : null
-        };
-      }).sort((a, b) => {
-        const order = { hot: 0, warm: 1, cold: 2 };
-        return order[a.heat] - order[b.heat] || (b.avgRpm ?? 0) - (a.avgRpm ?? 0);
-      });
-      const inbound = [...byDest.entries()].map(([city, list]) => {
-        const rpms = list.map((r) => {
-          const direct = marketNum(r.rpm);
-          if (direct != null)
-            return direct;
-          const mid = marketNum(r.midpoint);
-          const dist = marketNum(r.distance);
-          return mid != null && dist ? mid / dist : null;
-        });
-        const avgRpm = avg(rpms);
-        const avgLoad = avg(list.map((r) => marketNum(r.midpoint)));
-        return {
-          city: titleCaseMarket(city),
-          heat: inboundHeat(avgRpm, avgLoad),
-          avgRpm,
-          avgLoad: avgLoad != null ? Math.round(avgLoad) : null,
-          lanes: list.length
-        };
-      }).sort((a, b) => {
-        const order = { hot: 0, warm: 1, cold: 2 };
-        return order[a.heat] - order[b.heat] || (b.avgLoad ?? 0) - (a.avgLoad ?? 0);
-      });
-      const topLanes = [...rows].sort((a, b) => (marketNum(b.midpoint) ?? 0) - (marketNum(a.midpoint) ?? 0)).slice(0, 12).map((r) => ({
-        origin: shortOrigin(r.origin ?? ""),
-        destination: titleCaseMarket(r.destination ?? ""),
-        midpoint: marketNum(r.midpoint) != null ? Math.round(marketNum(r.midpoint)) : null,
-        rpm: (() => {
-          const direct = marketNum(r.rpm);
-          if (direct != null)
-            return Math.round(direct * 100) / 100;
-          const mid = marketNum(r.midpoint);
-          const dist = marketNum(r.distance);
-          return mid != null && dist ? Math.round(mid / dist * 100) / 100 : null;
-        })(),
-        miles: marketNum(r.distance) != null ? Math.round(marketNum(r.distance)) : null,
-        availability: marketNum(r.availability)
-      }));
-      return { ok: true, weekEnding, source: "USDA AgTransport", outbound, inbound, topLanes, error: null };
+      if (!snapshot || snapshotAgeMs > MARKET_ZONES_TTL_MS) {
+        const rows = await fetchUsdaReeferRows();
+        if (rows.length > 0) {
+          const payload = compileMarketZonesPayload(rows);
+          const fetchedAt = new Date;
+          await db.delete(marketZoneSnapshots);
+          await db.insert(marketZoneSnapshots).values({ payloadJson: JSON.stringify(payload), weekEnding: payload.weekEnding, fetchedAt });
+          return { ...payload, fetchedAt: fetchedAt.toISOString(), stale: false };
+        }
+        const stale = readSnapshot();
+        if (stale)
+          return stale;
+        return { ok: false, weekEnding: null, source: "USDA AgTransport", outbound: [], inbound: [], topLanes: [], error: "Live market data is temporarily unavailable. Try again in a few minutes.", fetchedAt: null, stale: false };
+      }
+      const cached = readSnapshot();
+      if (cached)
+        return cached;
+      return { ok: false, weekEnding: null, source: "USDA AgTransport", outbound: [], inbound: [], topLanes: [], error: "Live market data is temporarily unavailable. Try again in a few minutes.", fetchedAt: snapshot ? new Date(snapshot.fetchedAt).toISOString() : null, stale: true };
     }
   }),
   getDieselPrices: defineAction({
@@ -3864,7 +4081,7 @@ var pool = new Pool({ connectionString: databaseUrl, ssl: databaseUrl.includes("
 var drizzleDb = drizzle(pool, { schema: exports_schema });
 var db = Object.assign(drizzleDb, { batch: async (queries) => Promise.all(queries) });
 var clientRoot = normalize(join(import.meta.dir, "..", "client-dist"));
-var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql", "010_yard_post_photos.sql", "011_profile_image.sql", "012_yard_moderation_logs.sql", "013_hazmat_truck_brand.sql", "014_custom_app_background.sql", "015_add_account_language.sql", "016_add_wallet_documents.sql"];
+var migrationNames = ["001_initial.sql", "002_driver_community_feed.sql", "003_prepass.sql", "004_hos_status_tracking.sql", "005_dvir_log_editing.sql", "006_stripe_subscriptions.sql", "007_detention_claims.sql", "008_load_decision_cost_settings.sql", "009_yard_broker_shipper_ratings.sql", "010_yard_post_photos.sql", "011_profile_image.sql", "012_yard_moderation_logs.sql", "013_hazmat_truck_brand.sql", "014_custom_app_background.sql", "015_add_account_language.sql", "016_add_wallet_documents.sql", "017_market_zone_snapshots.sql", "018_add_load_equipment.sql", "019_add_app_feedback.sql"];
 var migrationRoot = normalize(join(import.meta.dir, "..", "postgres"));
 function requiredEnv(name) {
   const value = process.env[name]?.trim();

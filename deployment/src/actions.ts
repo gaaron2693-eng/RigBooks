@@ -233,10 +233,11 @@ const accountSchema = z.object({
 });
 const driverReplySchema = z.object({
   id: z.number(), postId: z.number(), driverName: z.string(), body: z.string(), createdAt: z.string(),
+  canDelete: z.boolean(),
 });
 const driverPostSchema = z.object({
   id: z.number(), driverName: z.string(), body: z.string(), createdAt: z.string(), likeCount: z.number(),
-  likedByViewer: z.boolean(), replies: z.array(driverReplySchema),
+  likedByViewer: z.boolean(), canDelete: z.boolean(), replies: z.array(driverReplySchema),
 });
 const truckBrandSchema = z.enum(["international", "peterbilt", "kenworth", "freightliner", "volvo", "mack", "western_star"]);
 const roadRouteSchema = z.object({
@@ -2273,8 +2274,8 @@ export const Actions = {
 
   listDriverFeed: defineAction({
     request: z.object({ sessionToken: sessionTokenSchema, limit: z.number().int().min(1).max(100).default(40) }),
-    response: z.object({ posts: z.array(driverPostSchema), memberCount: z.number(), asOf: z.string() }),
-    async handler(ctx, args): Promise<{ posts: Array<z.infer<typeof driverPostSchema>>; memberCount: number; asOf: string }> {
+    response: z.object({ posts: z.array(driverPostSchema), memberCount: z.number(), moderatorMode: z.boolean(), asOf: z.string() }),
+    async handler(ctx, args): Promise<{ posts: Array<z.infer<typeof driverPostSchema>>; memberCount: number; moderatorMode: boolean; asOf: string }> {
       const account = await requireAccount(ctx, args.sessionToken);
       const db = ctx.db<typeof schema>();
       const [postRows, memberRows] = await Promise.all([
@@ -2282,7 +2283,8 @@ export const Actions = {
         db.select({ id: schema.accounts.id }).from(schema.accounts),
       ]);
       const memberCount = memberRows.length;
-      if (postRows.length === 0) return { posts: [], memberCount, asOf: new Date().toISOString() };
+      const moderatorMode = account.role === "creator";
+      if (postRows.length === 0) return { posts: [], memberCount, moderatorMode, asOf: new Date().toISOString() };
       const postIds = postRows.map((row) => row.id);
       const [replyRows, likeRows] = await Promise.all([
         db.select().from(schema.driverReplies).where(inArray(schema.driverReplies.postId, postIds)).orderBy(asc(schema.driverReplies.createdAt)),
@@ -2302,16 +2304,18 @@ export const Actions = {
           createdAt: post.createdAt.toISOString(),
           likeCount: likes.length,
           likedByViewer: likes.some((like) => like.accountId === account.id),
+          canDelete: moderatorMode || post.accountId === account.id,
           replies: replyRows.filter((reply) => reply.postId === post.id).map((reply) => ({
             id: reply.id,
             postId: reply.postId,
             driverName: names.get(reply.accountId) ?? "RigRevenue driver",
             body: reply.body,
             createdAt: reply.createdAt.toISOString(),
+            canDelete: moderatorMode || reply.accountId === account.id,
           })),
         };
       });
-      return { posts, memberCount, asOf: new Date().toISOString() };
+      return { posts, memberCount, moderatorMode, asOf: new Date().toISOString() };
     },
   }),
 
